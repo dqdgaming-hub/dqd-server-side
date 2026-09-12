@@ -5,7 +5,7 @@ from django.core.management.base import BaseCommand
 
 
 class Command(BaseCommand):
-    help = "Create superuser if it does not exist"
+    help = "Create or promote a user to superuser/admin"
 
     def handle(self, *args, **options):
         User = get_user_model()
@@ -27,32 +27,20 @@ class Command(BaseCommand):
         user = User.objects.filter(email=email).first()
 
         if user:
-            if not user.is_superuser or not user.is_staff:
-                user.is_superuser = True
-                user.is_staff = True
-                user.is_active = True
-                user.set_password(password)
-                user.save(
-                    update_fields=[
-                        "is_superuser",
-                        "is_staff",
-                        "is_active",
-                        "password",
-                    ]
-                )
+            user.is_superuser = True
+            user.is_staff = True
+            user.is_active = True
+            user.is_verified = True
+            user.role = "admin"
+            user.set_password(password)
 
-                self.stdout.write(
-                    self.style.SUCCESS(
-                        f"Existing user {email} has been promoted to superuser."
-                    )
-                )
-            else:
-                self.stdout.write(
-                    self.style.WARNING(
-                        f"Superuser {email} already exists."
-                    )
-                )
+            user.save()
 
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"User {email} promoted to superuser/admin successfully."
+                )
+            )
             return
 
         user = User(
@@ -60,6 +48,8 @@ class Command(BaseCommand):
             is_staff=True,
             is_superuser=True,
             is_active=True,
+            is_verified=True,
+            role="admin",
         )
 
         user.set_password(password)
@@ -67,6 +57,6 @@ class Command(BaseCommand):
 
         self.stdout.write(
             self.style.SUCCESS(
-                f"Superuser {email} created successfully."
+                f"Superuser/admin {email} created successfully."
             )
         )
