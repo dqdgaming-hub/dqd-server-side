@@ -1,7 +1,7 @@
 import os
 
-from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
+from django.core.management.base import BaseCommand
 
 
 class Command(BaseCommand):
@@ -10,22 +10,63 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         User = get_user_model()
 
-        username = os.environ.get("DJANGO_SUPERUSER_USERNAME")
         email = os.environ.get("DJANGO_SUPERUSER_EMAIL")
         password = os.environ.get("DJANGO_SUPERUSER_PASSWORD")
 
-        if not username or not password:
-            self.stdout.write("Superuser environment variables not configured.")
+        if not email or not password:
+            self.stdout.write(
+                self.style.ERROR(
+                    "DJANGO_SUPERUSER_EMAIL and DJANGO_SUPERUSER_PASSWORD "
+                    "must be configured."
+                )
+            )
             return
 
-        if User.objects.filter(username=username).exists():
-            self.stdout.write("Superuser already exists.")
+        email = email.strip().lower()
+
+        user = User.objects.filter(email=email).first()
+
+        if user:
+            if not user.is_superuser or not user.is_staff:
+                user.is_superuser = True
+                user.is_staff = True
+                user.is_active = True
+                user.set_password(password)
+                user.save(
+                    update_fields=[
+                        "is_superuser",
+                        "is_staff",
+                        "is_active",
+                        "password",
+                    ]
+                )
+
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"Existing user {email} has been promoted to superuser."
+                    )
+                )
+            else:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"Superuser {email} already exists."
+                    )
+                )
+
             return
 
-        User.objects.create_superuser(
-            username=username,
+        user = User(
             email=email,
-            password=password,
+            is_staff=True,
+            is_superuser=True,
+            is_active=True,
         )
 
-        self.stdout.write("Superuser created successfully.")
+        user.set_password(password)
+        user.save()
+
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Superuser {email} created successfully."
+            )
+        )
