@@ -126,23 +126,13 @@ else:
     }
 
 
-REDIS_URL = env("REDIS_URL", required=not DEBUG)
-if REDIS_URL:
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.redis.RedisCache",
-            "LOCATION": REDIS_URL,
-            "KEY_PREFIX": env("CACHE_KEY_PREFIX", "dqdgaming"),
-            "TIMEOUT": env_int("CACHE_DEFAULT_TIMEOUT", 300),
-        }
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+        "LOCATION": "dqdgaming-cache",
+        "TIMEOUT": 300,
     }
-else:
-    CACHES = {
-        "default": {
-            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-            "LOCATION": "dqdgaming-development",
-        }
-    }
+}
 
 
 AUTH_PASSWORD_VALIDATORS = [
