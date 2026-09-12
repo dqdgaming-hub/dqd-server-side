@@ -7,6 +7,7 @@ from pathlib import Path
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.csp import CSP
 from dotenv import load_dotenv
+import json
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -227,12 +228,19 @@ CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS")
 CORS_ALLOW_CREDENTIALS = env_bool("CORS_ALLOW_CREDENTIALS", default=False)
 CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS")
 
-GOOGLE_SHEET_CREDENTIALS = Path(
-    env(
-        "GOOGLE_SHEET_CREDENTIALS",
-        str(BASE_DIR / "credentials" / "google-service-account.json"),
-    )
+GOOGLE_SERVICE_ACCOUNT_JSON = env(
+    "GOOGLE_SERVICE_ACCOUNT_JSON",
+    required=True,
 )
+
+try:
+    GOOGLE_SERVICE_ACCOUNT_INFO = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+except json.JSONDecodeError as error:
+    raise ImproperlyConfigured(
+        "GOOGLE_SERVICE_ACCOUNT_JSON contains invalid JSON."
+    ) from error
+
+GOOGLE_SHEET_ID = env("GOOGLE_SHEET_ID", required=True)
 GOOGLE_SHEET_ID = env("GOOGLE_SHEET_ID", "")
 
 USE_X_FORWARDED_FOR = env_bool("USE_X_FORWARDED_FOR", default=False)

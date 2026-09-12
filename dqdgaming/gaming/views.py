@@ -2851,8 +2851,10 @@ class AdminAccountingGoogleSheetSyncAPIView(APIView):
         ]
 
         credentials = Credentials.from_service_account_file(
-            settings.GOOGLE_SHEET_CREDENTIALS,
-            scopes=scopes,
+            settings.GOOGLE_SERVICE_ACCOUNT_INFO,
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+            ],
         )
 
         client = gspread.authorize(credentials)
