@@ -377,4 +377,4 @@ router.register(
     basename="admin-happy-hour-allocation"
 )
 
-urlpatterns += router.urls
+urlpatterns += router.urls     

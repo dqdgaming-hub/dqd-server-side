@@ -158,8 +158,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin, BaseModel):
         blank=True,
     )
 
-    profile_image = models.ImageField(
-        upload_to="users/profile/",
+    profile_image = models.BinaryField(
         null=True,
         blank=True,
     )
@@ -191,7 +190,7 @@ class CustomUser(AbstractBaseUser, PermissionsMixin, BaseModel):
 
     accepted_terms = models.ForeignKey(
         TermsAndConditions,
-        on_delete=models.PROTECT,
+        on_delete=models.CASCADE,
         null=True,
         blank=True,
         related_name="accepted_users"
@@ -302,8 +301,7 @@ class GameCategory(BaseModel):
         choices=CategoryType.choices,
     )
 
-    image = models.ImageField(
-        upload_to="game_categories/",
+    image = models.BinaryField(
         blank=True,
         null=True,
     )
@@ -330,7 +328,7 @@ class GamingItem(BaseModel):
 
     category = models.ForeignKey(
         GameCategory,
-        on_delete=models.PROTECT,
+        on_delete=models.CASCADE,
         related_name="gaming_items",
     )
 
@@ -338,8 +336,7 @@ class GamingItem(BaseModel):
 
     description = models.TextField(blank=True)
 
-    image = models.ImageField(
-        upload_to="gaming_items/",
+    image = models.BinaryField(
         blank=True,
         null=True,
     )
@@ -408,8 +405,7 @@ class ComboPack(BaseModel):
         help_text="Extra loyalty points awarded when this combo is booked",
     )
 
-    image = models.ImageField(
-        upload_to="combo_packs/",
+    image = models.BinaryField(
         blank=True,
         null=True,
     )
@@ -455,7 +451,7 @@ class Booking(BaseModel):
 
     user = models.ForeignKey(
         CustomUser,
-        on_delete=models.PROTECT,
+        on_delete=models.CASCADE,
         related_name="bookings",
         null=True,
         blank=True,
@@ -486,7 +482,7 @@ class Booking(BaseModel):
 
     item = models.ForeignKey(
         GamingItem,
-        on_delete=models.PROTECT,
+        on_delete=models.CASCADE,
         related_name="bookings",
         null=True,
         blank=True,
@@ -593,8 +589,7 @@ class Booking(BaseModel):
         editable=False,
     )
 
-    qr_code = models.ImageField(
-        upload_to="booking_qr/",
+    qr_code = models.BinaryField(
         blank=True,
         null=True,
     )
@@ -886,8 +881,7 @@ class ExclusiveEvent(BaseModel):
 
     max_participants = models.PositiveIntegerField()
 
-    image = models.ImageField(
-        upload_to="events/",
+    image = models.BinaryField(
         blank=True,
         null=True,
     )
@@ -929,7 +923,7 @@ class EventBooking(BaseModel):
         CustomUser,
         null=True,
         blank=True,
-        on_delete=models.SET_NULL,
+        on_delete=models.CASCADE,
         related_name="event_bookings",
     )
 
@@ -968,7 +962,7 @@ class EventBooking(BaseModel):
 
     qr_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
 
-    qr_code = models.ImageField(upload_to="event_booking_qr/", blank=True, null=True)
+    qr_code = models.BinaryField(blank=True, null=True)
 
     qr_sent = models.BooleanField(default=False)
 
@@ -1124,7 +1118,7 @@ class SpinnerSpin(BaseModel):
 
     reward = models.ForeignKey(
         "SpinnerReward",
-        on_delete=models.PROTECT,
+        on_delete=models.CASCADE,
         related_name="spins",
     )
 
@@ -1218,13 +1212,13 @@ class HappyHourSlot(BaseModel):
 
     template_slot = models.ForeignKey(
         HappyHourTemplateSlot,
-        on_delete=models.PROTECT,
+        on_delete=models.CASCADE,
         related_name="allocated_slots",
     )
 
     gaming_item = models.ForeignKey(
         GamingItem,
-        on_delete=models.PROTECT,
+        on_delete=models.CASCADE,
         null=True,
         blank=True,
         related_name="happy_hour_slots",

@@ -1,4 +1,5 @@
 import logging
+import os
 from urllib import request
 from django.shortcuts import get_object_or_404
 from rest_framework_simplejwt.settings import api_settings
@@ -12,7 +13,6 @@ from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.core.files.base import ContentFile
 from django.core.mail import send_mail
 from django.db.models import Q, Sum
 from django.utils import timezone
@@ -48,6 +48,12 @@ from gaming.models import (
     UserDevice,
 )
 from gaming.serializers import *
+
+from gaming.utils.image_encryption import (
+    encrypt_image_bytes,
+    encrypt_uploaded_image,
+    safe_image_to_data_uri,
+)
 
 from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle
 
@@ -122,21 +128,27 @@ def _persist_remote_profile_image(user, image_url):
         )
         return []
 
-    extension_map = {
-        "image/jpeg": "jpg",
-        "image/png": "png",
-        "image/webp": "webp",
-        "image/gif": "gif",
-    }
-    extension = extension_map.get(content_type.split(";")[0], "jpg")
+    try:
+        payload = encrypt_image_bytes(
+            content=content,
+            filename=os.path.basename(image_url.split("?", 1)[0]),
+        )
+    except DjangoValidationError as exc:
+        logger.warning(
+            "Profile image for %s could not be encrypted: %s",
+            user.email,
+            exc,
+        )
+        return []
 
-    user.profile_image.save(
-        f"{user.id}.{extension}",
-        ContentFile(content),
-        save=False,
-    )
-
+    user.profile_image = payload.encrypted_content
     return ["profile_image"]
+
+
+def _store_encrypted_qr_code(instance, qr_file):
+    payload = encrypt_uploaded_image(qr_file)
+    instance.qr_code = payload.encrypted_content
+    return payload
 
 
 def _finalize_login_response(
@@ -1545,7 +1557,6 @@ class AdminEventBookingDetailView(APIView):
         )
 
 
-import os
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -1587,17 +1598,12 @@ class AdminEventBookingApproveView(APIView):
                 data=str(booking.qr_token),
                 filename=f"event_qr_{booking.booking_id}.png",
             )
-            booking.qr_code.save(qr_file.name, qr_file, save=False)
+            _store_encrypted_qr_code(booking, qr_file)
 
         booking.save()
 
-        # ── 3. Build absolute QR image URL ────────────────────
-        base_url = os.environ.get("BACKEND_BASE_URL", "").rstrip("/")
-        qr_url = ""
-
-        if booking.qr_code:
-            qr_url = request.build_absolute_uri(booking.qr_code.url)
-        print(f"QR Code URL: {qr_url}")
+        # ── 3. Build decrypted QR data URI for email ────────────
+        qr_url = safe_image_to_data_uri(booking.qr_code) or ""
         # ── 4. Resolve recipient email ────────────────────────
         recipient_email = booking.user.email if booking.user else booking.email
         recipient_name = (
@@ -1854,7 +1860,7 @@ class AdminBookingApproveView(APIView):
                 data=str(booking.qr_token),
                 filename=f"booking_{booking.booking_id}.png",
             )
-            booking.qr_code.save(qr_file.name, qr_file, save=False)
+            _store_encrypted_qr_code(booking, qr_file)
 
         booking.save()
 
@@ -2966,9 +2972,6 @@ class ProfileAPIView(APIView):
 
         serializer.is_valid(raise_exception=True)
 
-        if "profile_image" in request.FILES and request.user.profile_image:
-            request.user.profile_image.delete(save=False)
-
         user = serializer.save()
 
         return Response(
@@ -3221,7 +3224,7 @@ class PublicHomeAPIView(APIView):
                     "title": event.title,
                     "subtitle": event.description,
                     "image": (
-                        request.build_absolute_uri(event.image.url)
+                        safe_image_to_data_uri(event.image)
                         if event.image
                         else None
                     ),
@@ -3238,7 +3241,7 @@ class PublicHomeAPIView(APIView):
                     "title": game.name,
                     "subtitle": game.description,
                     "image": (
-                        request.build_absolute_uri(game.image.url)
+                        safe_image_to_data_uri(game.image)
                         if game.image
                         else None
                     ),
