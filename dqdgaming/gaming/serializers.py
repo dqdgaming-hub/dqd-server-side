@@ -17,6 +17,10 @@ from rest_framework import serializers
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from gaming.models import CustomUser
+from gaming.utils.image_encryption import (
+    encrypt_uploaded_image,
+    safe_image_to_data_uri,
+)
 from django.utils import timezone
 
 
@@ -44,6 +48,35 @@ def get_tokens_for_user(user):
         "refresh": str(refresh),
         "access": str(refresh.access_token),
     }
+
+
+class EncryptedImageField(serializers.Field):
+    """
+    Encrypt uploaded images before they are stored in a BinaryField.
+    Decrypt stored images and return a frontend-ready data URI.
+    """
+
+    default_error_messages = {
+        "invalid": "A valid image file is required.",
+    }
+
+    def to_internal_value(self, data):
+        if data is None:
+            if self.allow_null:
+                return None
+            self.fail("invalid")
+
+        try:
+            payload = encrypt_uploaded_image(data)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages)
+        except (TypeError, ValueError, OSError) as exc:
+            raise serializers.ValidationError(str(exc))
+
+        return payload.encrypted_content
+
+    def to_representation(self, value):
+        return safe_image_to_data_uri(value)
 
 
 # ── Registration ─────────────────────────────────────────────
@@ -250,6 +283,7 @@ class LoginSerializer(serializers.Serializer):
 
 class UserProfileSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(read_only=True)
+    profile_image = EncryptedImageField(required=False, allow_null=True)
 
     class Meta:
         model = CustomUser
@@ -325,6 +359,11 @@ class GoogleLoginSerializer(serializers.Serializer):
     id_token = serializers.CharField()
 
 
+class GoogleCodeLoginSerializer(serializers.Serializer):
+    code = serializers.CharField()
+    redirect_uri = serializers.URLField()
+
+
 # ── Facebook Social Login ──────────────────────────────────────
 
 
@@ -353,6 +392,7 @@ from gaming.models import *
 
 class UserDetailsSerializer(serializers.ModelSerializer):
     full_name = serializers.ReadOnlyField()
+    profile_image = EncryptedImageField(read_only=True)
 
     class Meta:
         model = CustomUser
@@ -368,6 +408,7 @@ class UserDetailsSerializer(serializers.ModelSerializer):
 
 class GameSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
+    image = EncryptedImageField(read_only=True)
 
     class Meta:
         model = GamingItem
@@ -413,7 +454,7 @@ class BookingSerializer(serializers.ModelSerializer):
         decimal_places=2,
         read_only=True,
     )
-    item_image = serializers.ImageField(source="item.image", read_only=True)
+    item_image = EncryptedImageField(source="item.image", read_only=True)
 
     class Meta:
         model = Booking
@@ -438,6 +479,7 @@ class BookingSerializer(serializers.ModelSerializer):
 
 class ExclusiveEventSerializer(serializers.ModelSerializer):
     available_slots = serializers.ReadOnlyField()
+    image = EncryptedImageField(required=False, allow_null=True)
 
     class Meta:
         model = ExclusiveEvent
@@ -459,7 +501,7 @@ class EventBookingSerializer(serializers.ModelSerializer):
 
     event_date = serializers.DateField(source="event.event_date", read_only=True)
 
-    event_image = serializers.ImageField(source="event.image", read_only=True)
+    event_image = EncryptedImageField(source="event.image", read_only=True)
 
     is_qr_valid = serializers.SerializerMethodField()
 
@@ -491,6 +533,7 @@ class UserSpinnerRewardSerializer(serializers.ModelSerializer):
 
 
 class ComboPackSerializer(serializers.ModelSerializer):
+    image = EncryptedImageField(required=False, allow_null=True)
 
     class Meta:
         model = ComboPack
@@ -540,6 +583,7 @@ class SpinnerSpinSerializer(serializers.ModelSerializer):
 
 class NavbarUserSerializer(serializers.ModelSerializer):
     full_name = serializers.CharField(read_only=True)
+    profile_image = EncryptedImageField(read_only=True)
     profile_image_url = serializers.SerializerMethodField()
 
     class Meta:
@@ -562,10 +606,7 @@ class NavbarUserSerializer(serializers.ModelSerializer):
         if not obj.profile_image:
             return None
 
-        request = self.context.get("request")
-        url = obj.profile_image.url
-
-        return request.build_absolute_uri(url) if request else url
+        return safe_image_to_data_uri(obj.profile_image)
 
 
 from rest_framework import serializers
@@ -647,10 +688,7 @@ class AdminDashboardUserSerializer(serializers.ModelSerializer):
         if not user.profile_image:
             return None
 
-        request = self.context.get("request")
-        image_url = user.profile_image.url
-
-        return request.build_absolute_uri(image_url) if request else image_url
+        return safe_image_to_data_uri(user.profile_image)
 
     def get_is_online(self, user):
         device = (
@@ -726,29 +764,18 @@ from gaming.models import (
 
 class AdminGameCategorySerializer(serializers.ModelSerializer):
 
-    image = serializers.SerializerMethodField()
+    image = EncryptedImageField(required=False, allow_null=True)
 
     class Meta:
         model = GameCategory
         fields = "__all__"
-
-    def get_image(self, obj):
-        if not obj.image:
-            return None
-
-        request = self.context.get("request")
-        if request:
-            return request.build_absolute_uri(obj.image.url)
-
-        base_url = getattr(settings, "SITE_URL", "").rstrip("/")
-        return f"{base_url}{obj.image.url}"
 
 
 class AdminGamingItemSerializer(serializers.ModelSerializer):
 
     category_name = serializers.CharField(source="category.name", read_only=True)
 
-    image = serializers.ImageField(
+    image = EncryptedImageField(
             required=False,
             allow_null=True,
         )
@@ -759,20 +786,13 @@ class AdminGamingItemSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-
-        if instance.image:
-            request = self.context.get("request")
-
-            if request:
-                data["image"] = request.build_absolute_uri(instance.image.url)
-            else:
-                base_url = getattr(settings, "SITE_URL", "").rstrip("/")
-                data["image"] = f"{base_url}{instance.image.url}"
-
+        data["image"] = safe_image_to_data_uri(instance.image)
         return data
 
 
 class AdminComboPackSerializer(serializers.ModelSerializer):
+
+    image = EncryptedImageField(required=False, allow_null=True)
 
     gaming_items = serializers.PrimaryKeyRelatedField(
         many=True, queryset=GamingItem.objects.all()
@@ -784,21 +804,13 @@ class AdminComboPackSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-
-        if instance.image:
-            request = self.context.get("request")
-            if request:
-                data["image"] = request.build_absolute_uri(instance.image.url)
-            else:
-                base_url = getattr(settings, "SITE_URL", "").rstrip("/")
-                data["image"] = f"{base_url}{instance.image.url}"
-        else:
-            data["image"] = None
-
+        data["image"] = safe_image_to_data_uri(instance.image)
         return data
 
 
 class AdminExclusiveEventSerializer(serializers.ModelSerializer):
+
+    image = EncryptedImageField(required=False, allow_null=True)
 
     class Meta:
         model = ExclusiveEvent
@@ -814,18 +826,9 @@ class AdminExclusiveEventSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-
-        if instance.image:
-            request = self.context.get("request")
-            if request:
-                data["image"] = request.build_absolute_uri(instance.image.url)
-            else:
-                base_url = getattr(settings, "SITE_URL", "").rstrip("/")
-                data["image"] = f"{base_url}{instance.image.url}"
-        else:
-            data["image"] = None
-
+        data["image"] = safe_image_to_data_uri(instance.image)
         return data
+
 
 class AdminUserListSerializer(serializers.ModelSerializer):
 
@@ -848,15 +851,7 @@ class AdminUserListSerializer(serializers.ModelSerializer):
         ]
 
     def get_profile_image(self, obj):
-        if not obj.profile_image:
-            return None
-
-        request = self.context.get("request")
-        if request:
-            return request.build_absolute_uri(obj.profile_image.url)
-
-        base_url = getattr(settings, "SITE_URL", "").rstrip("/")
-        return f"{base_url}{obj.profile_image.url}"
+        return safe_image_to_data_uri(obj.profile_image)
 
 
 class AdminUserDeviceSerializer(serializers.ModelSerializer):
@@ -913,15 +908,7 @@ class AdminUserDetailSerializer(serializers.ModelSerializer):
         return obj.bookings.count()
 
     def get_profile_image(self, obj):
-        if not obj.profile_image:
-            return None
-
-        request = self.context.get("request")
-        if request:
-            return request.build_absolute_uri(obj.profile_image.url)
-
-        base_url = getattr(settings, "SITE_URL", "").rstrip("/")
-        return f"{base_url}{obj.profile_image.url}"
+        return safe_image_to_data_uri(obj.profile_image)
 
 
 class AdminEventBookingSerializer(serializers.ModelSerializer):
@@ -952,6 +939,7 @@ class AdminEventBookingDetailSerializer(serializers.ModelSerializer):
     event_title = serializers.CharField(source="event.title", read_only=True)
 
     qr_code_url = serializers.SerializerMethodField()
+    qr_code = EncryptedImageField(read_only=True)
 
     class Meta:
         model = EventBooking
@@ -965,12 +953,14 @@ class AdminEventBookingDetailSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
 
         if request:
-            return request.build_absolute_uri(obj.qr_code.url)
+            return safe_image_to_data_uri(obj.qr_code)
 
-        return obj.qr_code.url
+        return safe_image_to_data_uri(obj.qr_code)
 
 
 class AdminEventBookingCreateSerializer(serializers.ModelSerializer):
+
+    qr_code = EncryptedImageField(read_only=True)
 
     class Meta:
         model = EventBooking
@@ -1284,8 +1274,8 @@ class AdminBookingDetailSerializer(serializers.ModelSerializer):
             return None
         request = self.context.get("request")
         if request:
-            return request.build_absolute_uri(obj.qr_code.url)
-        return obj.qr_code.url
+            return safe_image_to_data_uri(obj.qr_code)
+        return safe_image_to_data_uri(obj.qr_code)
 
 
 class HappyHourTemplateSlotSerializer(serializers.ModelSerializer):
@@ -1568,6 +1558,7 @@ from gaming.models import CustomUser
 
 
 class ProfileSerializer(serializers.ModelSerializer):
+    profile_image = EncryptedImageField(required=False, allow_null=True)
 
     class Meta:
         model = CustomUser
@@ -1737,7 +1728,7 @@ class UserGameCategorySerializer(serializers.ModelSerializer):
     def get_image(self, obj):
         request = self.context.get("request")
         if obj.image:
-            return request.build_absolute_uri(obj.image.url)
+            return safe_image_to_data_uri(obj.image)
         return None
 
 
@@ -1767,7 +1758,7 @@ class UserGamingItemListSerializer(serializers.ModelSerializer):
     def get_image(self, obj):
         request = self.context.get("request")
         if obj.image:
-            return request.build_absolute_uri(obj.image.url)
+            return safe_image_to_data_uri(obj.image)
         return None
 
 
@@ -1795,7 +1786,7 @@ class UserGamingItemDetailSerializer(serializers.ModelSerializer):
     def get_image(self, obj):
         request = self.context.get("request")
         if obj.image:
-            return request.build_absolute_uri(obj.image.url)
+            return safe_image_to_data_uri(obj.image)
         return None
 
 
@@ -1991,7 +1982,7 @@ class BookingListSerializer(serializers.ModelSerializer):
             image = obj.combo_pack.image
 
         if image:
-            return request.build_absolute_uri(image.url)
+            return safe_image_to_data_uri(image)
 
         return None
 
@@ -2069,7 +2060,7 @@ class BookingDetailSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
 
         if obj.qr_code:
-            return request.build_absolute_uri(obj.qr_code.url)
+            return safe_image_to_data_uri(obj.qr_code)
 
         return None
 
@@ -2126,7 +2117,7 @@ class HomeBannerSerializer(serializers.Serializer):
 
     subtitle = serializers.CharField()
 
-    image = serializers.ImageField()
+    image = serializers.CharField(allow_null=True, read_only=True)
 
     type = serializers.CharField()
 
@@ -2155,16 +2146,7 @@ class HomeEventSerializer(serializers.ModelSerializer):
         )
 
     def get_image(self, obj):
-
-        if not obj.image:
-            return None
-
-        request = self.context.get("request")
-
-        if request:
-            return request.build_absolute_uri(obj.image.url)
-
-        return obj.image.url
+        return safe_image_to_data_uri(obj.image)
 
 
 class HomeComboSerializer(serializers.ModelSerializer):
@@ -2184,16 +2166,7 @@ class HomeComboSerializer(serializers.ModelSerializer):
         )
 
     def get_image(self, obj):
-
-        if not obj.image:
-            return None
-
-        request = self.context.get("request")
-
-        if request:
-            return request.build_absolute_uri(obj.image.url)
-
-        return obj.image.url
+        return safe_image_to_data_uri(obj.image)
 
 
 class HomeGameSerializer(serializers.ModelSerializer):
@@ -2213,16 +2186,7 @@ class HomeGameSerializer(serializers.ModelSerializer):
         )
 
     def get_image(self, obj):
-
-        if not obj.image:
-            return None
-
-        request = self.context.get("request")
-
-        if request:
-            return request.build_absolute_uri(obj.image.url)
-
-        return obj.image.url
+        return safe_image_to_data_uri(obj.image)
 
 
 class HomeCategorySerializer(serializers.ModelSerializer):
@@ -2245,16 +2209,7 @@ class HomeCategorySerializer(serializers.ModelSerializer):
         )
 
     def get_image(self, obj):
-
-        if not obj.image:
-            return None
-
-        request = self.context.get("request")
-
-        if request:
-            return request.build_absolute_uri(obj.image.url)
-
-        return obj.image.url
+        return safe_image_to_data_uri(obj.image)
 
 
 class HomeStatsSerializer(serializers.Serializer):
@@ -2392,11 +2347,7 @@ class UserBookingWalletSerializer(serializers.ModelSerializer):
         ).isoformat()
 
     def _absolute_media_url(self, file_field):
-        if not file_field:
-            return None
-        request = self.context.get("request")
-        url = file_field.url
-        return request.build_absolute_uri(url) if request else url
+        return safe_image_to_data_uri(file_field)
 
 
 class UserEventBookingWalletSerializer(serializers.ModelSerializer):
@@ -2453,11 +2404,7 @@ class UserEventBookingWalletSerializer(serializers.ModelSerializer):
         return "event"
 
     def get_image(self, obj):
-        if not obj.event.image:
-            return None
-        request = self.context.get("request")
-        url = obj.event.image.url
-        return request.build_absolute_uri(url) if request else url
+        return safe_image_to_data_uri(obj.event.image)
 
     def get_starts_at(self, obj):
         return timezone.make_aware(
@@ -2473,11 +2420,7 @@ class UserEventBookingWalletSerializer(serializers.ModelSerializer):
         return "paid" if obj.amount_paid and obj.amount_paid > 0 else "pending"
 
     def get_qr_code_url(self, obj):
-        if not obj.qr_code:
-            return None
-        request = self.context.get("request")
-        url = obj.qr_code.url
-        return request.build_absolute_uri(url) if request else url
+        return safe_image_to_data_uri(obj.qr_code)
 
     def get_can_cancel(self, obj):
         if obj.status in [EventBooking.Status.CANCELLED, EventBooking.Status.ATTENDED]:
@@ -2682,6 +2625,7 @@ class LoyaltyRedeemedBookingSerializer(serializers.ModelSerializer):
 
 class UserGamingItemSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source="category.name", read_only=True)
+    image = EncryptedImageField(read_only=True)
     image_url = serializers.SerializerMethodField()
 
     class Meta:
@@ -2700,15 +2644,7 @@ class UserGamingItemSerializer(serializers.ModelSerializer):
         ]
 
     def get_image_url(self, obj):
-        request = self.context.get("request")
-
-        if not obj.image:
-            return None
-
-        if request:
-            return request.build_absolute_uri(obj.image.url)
-
-        return obj.image.url
+        return safe_image_to_data_uri(obj.image)
 
 
 
@@ -2732,6 +2668,7 @@ class AvailableSlotSerializer(serializers.Serializer):
 
 class UpcomingEventSerializer(serializers.ModelSerializer):
     available_slots = serializers.ReadOnlyField()
+    image = EncryptedImageField(read_only=True)
 
     class Meta:
         model = ExclusiveEvent
@@ -2799,28 +2736,10 @@ class EventBookingSerializer(serializers.ModelSerializer):
         ]
 
     def get_event_image(self, obj):
-
-        if not obj.event.image:
-            return None
-
-        request = self.context.get("request")
-
-        if request:
-            return request.build_absolute_uri(obj.event.image.url)
-
-        return f"{settings.SITE_URL.rstrip('/')}{obj.event.image.url}"
+        return safe_image_to_data_uri(obj.event.image)
 
     def get_qr_code(self, obj):
-
-        if not obj.qr_code:
-            return None
-
-        request = self.context.get("request")
-
-        if request:
-            return request.build_absolute_uri(obj.qr_code.url)
-
-        return f"{settings.SITE_URL.rstrip('/')}{obj.qr_code.url}"
+        return safe_image_to_data_uri(obj.qr_code)
     
 
     
@@ -2849,16 +2768,11 @@ from gaming.models import Booking, BookingMember, ComboPack
 
 
 def absolute_media_url(request, file_field):
-    if not file_field:
-        return None
-    try:
-        url = file_field.url
-    except ValueError:
-        return None
-    if request:
-        return request.build_absolute_uri(url)
-    site_url = getattr(settings, "SITE_URL", "").rstrip("/")
-    return f"{site_url}{url}" if site_url else url
+    """
+    Keep the existing helper name for compatibility.
+    BinaryField images are returned as decrypted data URIs.
+    """
+    return safe_image_to_data_uri(file_field)
 
 
 def combo_price(obj):

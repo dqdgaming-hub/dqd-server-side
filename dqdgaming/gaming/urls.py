@@ -70,6 +70,7 @@ urlpatterns = [
     path("token/verify/", TokenVerifyView.as_view(), name="token-verify"),
     # ── Social auth ───────────────────────────────────────────
     path("social/google/", GoogleLoginView.as_view(), name="auth-social-google"),
+    path("social/google/code/", GoogleCodeLoginView.as_view(), name="auth-social-google-code"),
     path("social/facebook/", FacebookLoginView.as_view(), name="auth-social-facebook"),
     path("navbar-profile/", NavbarProfileView.as_view(), name="navbar-profile"),
     path("user/dashboard/", UserDashboardAPIView.as_view(), name="user-dashboard"),
@@ -377,4 +378,4 @@ router.register(
     basename="admin-happy-hour-allocation"
 )
 
-urlpatterns += router.urls
+urlpatterns += router.urls     

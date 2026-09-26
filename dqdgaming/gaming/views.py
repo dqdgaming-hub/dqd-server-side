@@ -1,5 +1,7 @@
 import logging
+import os
 from urllib import request
+from urllib.parse import urlparse
 from django.shortcuts import get_object_or_404
 from rest_framework_simplejwt.settings import api_settings
 from gaming.utils.emailjs import send_game_booking_email
@@ -12,7 +14,6 @@ from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as DjangoValidationError
-from django.core.files.base import ContentFile
 from django.core.mail import send_mail
 from django.db.models import Q, Sum
 from django.utils import timezone
@@ -48,6 +49,12 @@ from gaming.models import (
     UserDevice,
 )
 from gaming.serializers import *
+
+from gaming.utils.image_encryption import (
+    encrypt_image_bytes,
+    encrypt_uploaded_image,
+    safe_image_to_data_uri,
+)
 
 from rest_framework.throttling import AnonRateThrottle, ScopedRateThrottle
 
@@ -122,21 +129,27 @@ def _persist_remote_profile_image(user, image_url):
         )
         return []
 
-    extension_map = {
-        "image/jpeg": "jpg",
-        "image/png": "png",
-        "image/webp": "webp",
-        "image/gif": "gif",
-    }
-    extension = extension_map.get(content_type.split(";")[0], "jpg")
+    try:
+        payload = encrypt_image_bytes(
+            content=content,
+            filename=os.path.basename(image_url.split("?", 1)[0]),
+        )
+    except DjangoValidationError as exc:
+        logger.warning(
+            "Profile image for %s could not be encrypted: %s",
+            user.email,
+            exc,
+        )
+        return []
 
-    user.profile_image.save(
-        f"{user.id}.{extension}",
-        ContentFile(content),
-        save=False,
-    )
-
+    user.profile_image = payload.encrypted_content
     return ["profile_image"]
+
+
+def _store_encrypted_qr_code(instance, qr_file):
+    payload = encrypt_uploaded_image(qr_file)
+    instance.qr_code = payload.encrypted_content
+    return payload
 
 
 def _finalize_login_response(
@@ -566,81 +579,152 @@ class GoogleLoginView(APIView):
         serializer = GoogleLoginSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        token = serializer.validated_data["id_token"]
+        return _complete_google_login(
+            request,
+            serializer.validated_data["id_token"],
+        )
+
+
+class GoogleCodeLoginView(APIView):
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
+    throttle_scope = "social_login"
+
+    def post(self, request):
+        serializer = GoogleCodeLoginSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        if not settings.GOOGLE_CLIENT_SECRET:
+            return Response(
+                {"detail": "Google redirect sign-in is not configured."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        redirect_uri = serializer.validated_data["redirect_uri"]
+        parsed_redirect = urlparse(redirect_uri)
+        redirect_origin = f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
+        allowed_origins = {
+            origin.rstrip("/") for origin in settings.CORS_ALLOWED_ORIGINS
+        }
+
+        if (
+            redirect_origin not in allowed_origins
+            or parsed_redirect.path != "/sign-in"
+            or parsed_redirect.query
+            or parsed_redirect.fragment
+            or parsed_redirect.username
+            or parsed_redirect.password
+        ):
+            return Response(
+                {"detail": "Invalid Google redirect URI."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
-            google_data = google_id_token.verify_oauth2_token(
-                token,
-                google_requests.Request(),
-                settings.GOOGLE_CLIENT_ID,
+            token_response = http_requests.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": serializer.validated_data["code"],
+                    "client_id": settings.GOOGLE_CLIENT_ID,
+                    "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                    "redirect_uri": redirect_uri,
+                    "grant_type": "authorization_code",
+                },
+                timeout=10,
             )
-        except ValueError as exc:
-            logger.warning(
-                "Google token verification failed: %s",
-                exc,
-            )
+            token_response.raise_for_status()
+            token_data = token_response.json()
+        except (http_requests.RequestException, ValueError):
+            logger.warning("Google authorization-code exchange failed.")
             return Response(
-                {"detail": "Invalid Google token."},
+                {"detail": "Google sign-in could not be verified."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        email = google_data.get("email", "").strip().lower()
-        first_name = google_data.get("given_name", "").strip()
-        last_name = google_data.get("family_name", "").strip()
-        picture = google_data.get("picture", "")
-        google_email_verified = google_data.get(
-            "email_verified",
-            False,
-        )
-
-        if not email or not google_email_verified:
+        id_token = token_data.get("id_token")
+        if not id_token:
             return Response(
-                {"detail": "Google account email is not verified."},
+                {"detail": "Google sign-in did not return an ID token."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        user, is_new = CustomUser.objects.get_or_create(
-            email=email,
-            defaults={
-                "first_name": first_name or "Google User",
-                "last_name": last_name,
-                "login_provider": CustomUser.LoginProvider.GOOGLE,
-                "is_verified": True,
-                "role": CustomUser.Role.USER,
-            },
+        return _complete_google_login(request, id_token)
+
+
+def _complete_google_login(request, token):
+    try:
+        google_data = google_id_token.verify_oauth2_token(
+            token,
+            google_requests.Request(),
+            settings.GOOGLE_CLIENT_ID,
         )
-
-        validate_login_allowed(user)
-
-        update_fields = []
-
-        if not user.first_name and first_name:
-            user.first_name = first_name
-            update_fields.append("first_name")
-
-        if not user.last_name and last_name:
-            user.last_name = last_name
-            update_fields.append("last_name")
-
-        if not user.is_verified:
-            user.is_verified = True
-            update_fields.append("is_verified")
-
-        update_fields.extend(_persist_remote_profile_image(user, picture))
-
-        if update_fields:
-            update_fields.append("updated_at")
-            user.save(update_fields=list(dict.fromkeys(update_fields)))
-
+    except ValueError as exc:
+        logger.warning(
+            "Google token verification failed: %s",
+            exc,
+        )
         return Response(
-            _finalize_device_login(
-                user,
-                request,
-                is_new=is_new,
-                include_is_new=True,
-            ),
-            status=status.HTTP_200_OK,
+            {"detail": "Invalid Google token."},
+            status=status.HTTP_400_BAD_REQUEST,
         )
+
+    email = google_data.get("email", "").strip().lower()
+    first_name = google_data.get("given_name", "").strip()
+    last_name = google_data.get("family_name", "").strip()
+    picture = google_data.get("picture", "")
+    google_email_verified = google_data.get(
+        "email_verified",
+        False,
+    )
+
+    if not email or not google_email_verified:
+        return Response(
+            {"detail": "Google account email is not verified."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    user, is_new = CustomUser.objects.get_or_create(
+        email=email,
+        defaults={
+            "first_name": first_name or "Google User",
+            "last_name": last_name,
+            "login_provider": CustomUser.LoginProvider.GOOGLE,
+            "is_verified": True,
+            "role": CustomUser.Role.USER,
+        },
+    )
+
+    validate_login_allowed(user)
+
+    update_fields = []
+
+    if not user.first_name and first_name:
+        user.first_name = first_name
+        update_fields.append("first_name")
+
+    if not user.last_name and last_name:
+        user.last_name = last_name
+        update_fields.append("last_name")
+
+    if not user.is_verified:
+        user.is_verified = True
+        update_fields.append("is_verified")
+
+    update_fields.extend(_persist_remote_profile_image(user, picture))
+
+    if update_fields:
+        update_fields.append("updated_at")
+        user.save(update_fields=list(dict.fromkeys(update_fields)))
+
+    return Response(
+        _finalize_device_login(
+            user,
+            request,
+            is_new=is_new,
+            include_is_new=True,
+        ),
+        status=status.HTTP_200_OK,
+    )
 
 
 # ============================================================
@@ -1545,7 +1629,6 @@ class AdminEventBookingDetailView(APIView):
         )
 
 
-import os
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -1587,17 +1670,12 @@ class AdminEventBookingApproveView(APIView):
                 data=str(booking.qr_token),
                 filename=f"event_qr_{booking.booking_id}.png",
             )
-            booking.qr_code.save(qr_file.name, qr_file, save=False)
+            _store_encrypted_qr_code(booking, qr_file)
 
         booking.save()
 
-        # ── 3. Build absolute QR image URL ────────────────────
-        base_url = os.environ.get("BACKEND_BASE_URL", "").rstrip("/")
-        qr_url = ""
-
-        if booking.qr_code:
-            qr_url = request.build_absolute_uri(booking.qr_code.url)
-        print(f"QR Code URL: {qr_url}")
+        # ── 3. Build decrypted QR data URI for email ────────────
+        qr_url = safe_image_to_data_uri(booking.qr_code) or ""
         # ── 4. Resolve recipient email ────────────────────────
         recipient_email = booking.user.email if booking.user else booking.email
         recipient_name = (
@@ -1854,7 +1932,7 @@ class AdminBookingApproveView(APIView):
                 data=str(booking.qr_token),
                 filename=f"booking_{booking.booking_id}.png",
             )
-            booking.qr_code.save(qr_file.name, qr_file, save=False)
+            _store_encrypted_qr_code(booking, qr_file)
 
         booking.save()
 
@@ -2966,9 +3044,6 @@ class ProfileAPIView(APIView):
 
         serializer.is_valid(raise_exception=True)
 
-        if "profile_image" in request.FILES and request.user.profile_image:
-            request.user.profile_image.delete(save=False)
-
         user = serializer.save()
 
         return Response(
@@ -3159,6 +3234,8 @@ now = timezone.localtime()
 
 class PublicHomeAPIView(APIView):
     permission_classes = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "public_home"
 
     def get(self, request):
 
@@ -3221,7 +3298,7 @@ class PublicHomeAPIView(APIView):
                     "title": event.title,
                     "subtitle": event.description,
                     "image": (
-                        request.build_absolute_uri(event.image.url)
+                        safe_image_to_data_uri(event.image)
                         if event.image
                         else None
                     ),
@@ -3238,7 +3315,7 @@ class PublicHomeAPIView(APIView):
                     "title": game.name,
                     "subtitle": game.description,
                     "image": (
-                        request.build_absolute_uri(game.image.url)
+                        safe_image_to_data_uri(game.image)
                         if game.image
                         else None
                     ),
