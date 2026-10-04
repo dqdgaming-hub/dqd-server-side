@@ -38,10 +38,9 @@ gunicorn dqdgaming.wsgi:application --bind 127.0.0.1:8000 --workers 3 --timeout 
 
 Place Nginx, Caddy, or your cloud load balancer in front of the application. Terminate TLS there and serve `/static/` directly from `STATIC_ROOT`; serve `/media/` only if this single-server filesystem storage is intentional. For multiple application instances, move media to object storage.
 
-Set the proxy variables only when the proxy removes incoming `X-Forwarded-For` and `X-Forwarded-Proto` values before adding its own:
+Production defaults to trusting `X-Forwarded-For` for client IP tracking and to trusting `X-Forwarded-Proto` only when explicitly enabled. Keep this deployment behind a proxy that removes incoming forwarded headers and sets trusted values. For local development, `DEBUG=True` keeps IP tracking on `REMOTE_ADDR`.
 
 ```dotenv
-USE_X_FORWARDED_FOR=True
 USE_X_FORWARDED_PROTO=True
 ```
 

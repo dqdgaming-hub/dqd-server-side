@@ -1,5 +1,6 @@
 import uuid
 import datetime
+import secrets
 
 from django.db import models
 from django.contrib.auth.models import (
@@ -696,17 +697,6 @@ class Booking(BaseModel):
 
         if self.start_time >= self.end_time:
             raise ValidationError("Start time must be before end time.")
-        if self.happy_hour_slot:
-
-            overlap = Booking.objects.filter(
-                booking_date=self.booking_date,
-                item=self.item,
-                start_time__lt=self.end_time,
-                end_time__gt=self.start_time,
-            ).exclude(pk=self.pk)
-
-            if overlap.exists():
-                raise ValidationError("Happy Hour slot already occupied.")
         # Guest validation
         if not self.item and not self.combo_pack:
             raise ValidationError("Either item or combo pack is required.")
@@ -721,19 +711,25 @@ class Booking(BaseModel):
             if not self.guest_phone:
                 raise ValidationError("Guest phone is required.")
 
-        overlapping = (
-            Booking.objects.filter(
+        if self.item:
+            overlapping = Booking.objects.filter(
                 item=self.item,
                 booking_date=self.booking_date,
                 start_time__lt=self.end_time,
                 end_time__gt=self.start_time,
-            )
-            .exclude(pk=self.pk)
-            .exclude(status=Booking.Status.CANCELLED)
-        )
+                status__in=[
+                    Booking.Status.PENDING,
+                    Booking.Status.CONFIRMED,
+                ],
+            ).exclude(pk=self.pk)
 
-        if overlapping.exists():
-            raise ValidationError("This slot is already booked.")
+            if overlapping.exists():
+                message = (
+                    "Happy Hour slot already occupied."
+                    if self.happy_hour_slot
+                    else "This slot is already booked."
+                )
+                raise ValidationError(message)
 
     def save(self, *args, **kwargs):
 
@@ -894,7 +890,14 @@ class ExclusiveEvent(BaseModel):
 
     @property
     def available_slots(self):
-        booked = self.bookings.count()
+        booked = self.bookings.filter(
+            is_deleted=False,
+        ).exclude(
+            status__in=[
+                EventBooking.Status.CANCELLED,
+                EventBooking.Status.REJECTED,
+            ],
+        ).count()
         return max(0, self.max_participants - booked)
 
 
@@ -987,7 +990,7 @@ class EventBooking(BaseModel):
             self.qr_code
             and self.qr_sent
             and not self.checked_in
-            and self.status == self.Status.CONFIRMED
+            and self.status == self.Status.APPROVED
         )
 
 
@@ -1372,7 +1375,6 @@ class BookingExportRequest(BaseModel):
         return f"{self.requested_by.email} | " f"{self.period_type} | {self.status}"
 
 
-import random
 from datetime import timedelta
 from django.utils import timezone
 
@@ -1386,7 +1388,7 @@ class PasswordResetOTP(BaseModel):
     )
 
     otp = models.CharField(
-        max_length=6,
+        max_length=128,
     )
 
     expires_at = models.DateTimeField()
@@ -1408,7 +1410,7 @@ class PasswordResetOTP(BaseModel):
 
     @classmethod
     def generate_otp(cls):
-        return str(random.randint(100000, 999999))
+        return str(secrets.randbelow(900000) + 100000)
 
 
 

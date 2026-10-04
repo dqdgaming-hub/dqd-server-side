@@ -18,7 +18,7 @@ def award_booking_loyalty_points(booking, admin_user=None):
 
     booking = (
         Booking.objects.select_related("user", "combo_pack")
-        .select_for_update()
+        .select_for_update(of=("self",))
         .get(pk=booking.pk)
     )
 

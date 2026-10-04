@@ -1,5 +1,6 @@
 import logging
 import os
+import secrets
 from urllib import request
 from urllib.parse import urlparse
 from django.shortcuts import get_object_or_404
@@ -12,9 +13,15 @@ from rest_framework.views import APIView
 import requests as http_requests
 from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.hashers import (
+    check_password,
+    identify_hasher,
+    make_password,
+)
 from django.contrib.auth.tokens import default_token_generator
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.mail import send_mail
+from django.db import transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
@@ -1059,6 +1066,11 @@ class UserSpinView(DeviceActivityMixin, APIView):
 
         population = list(rewards)
         weights = [r.probability for r in population]
+        if not any(weights):
+            return Response(
+                {"detail": "No rewards configured."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         reward = random.choices(population, weights=weights, k=1)[0]
 
         # Save spin — unique_together is a safety net against race conditions
@@ -1257,19 +1269,11 @@ from gaming.serializers import (
 )
 
 
-def admin_only(user):
-    return user.is_authenticated and user.is_superuser
-
-
 class AdminCategoryListCreateView(APIView):
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminUserRole]
 
     def get(self, request):
-
-        if not admin_only(request.user):
-            return Response(status=403)
-
         serializer = AdminGameCategorySerializer(
             GameCategory.objects.all(),
             many=True,
@@ -1279,10 +1283,6 @@ class AdminCategoryListCreateView(APIView):
         return Response(serializer.data)
 
     def post(self, request):
-
-        if not admin_only(request.user):
-            return Response(status=403)
-
         serializer = AdminGameCategorySerializer(
             data=request.data,
             context={"request": request},
@@ -1296,7 +1296,7 @@ class AdminCategoryListCreateView(APIView):
 
 class AdminGameListCreateView(APIView):
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminUserRole]
 
     def get(self, request):
 
@@ -1320,7 +1320,7 @@ class AdminGameListCreateView(APIView):
 
 class AdminComboPackListCreateView(APIView):
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminUserRole]
 
     def get(self, request):
 
@@ -1347,7 +1347,7 @@ class AdminComboPackListCreateView(APIView):
 
 class AdminEventListCreateView(APIView):
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminUserRole]
 
     def get(self, request):
 
@@ -1374,7 +1374,7 @@ class AdminEventListCreateView(APIView):
 
 class AdminGameDetailView(APIView):
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminUserRole]
 
     def put(self, request, pk):
 
@@ -1401,7 +1401,7 @@ class AdminGameDetailView(APIView):
 
 class AdminCategoryDetailView(APIView):
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminUserRole]
 
     def put(self, request, pk):
 
@@ -1428,7 +1428,7 @@ class AdminCategoryDetailView(APIView):
 
 class AdminComboPackDetailView(APIView):
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminUserRole]
 
     def put(self, request, pk):
 
@@ -1458,7 +1458,7 @@ class AdminComboPackDetailView(APIView):
 
 class AdminEventDetailView(APIView):
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsAdminUserRole]
 
     def put(self, request, pk):
 
@@ -1759,6 +1759,7 @@ class AdminVerifyEventQRView(APIView):
         IsAdminUserRole,
     ]
 
+    @transaction.atomic
     def post(self, request):
 
         qr_token = (request.data.get("qr_token") or "").strip()
@@ -1777,7 +1778,11 @@ class AdminVerifyEventQRView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        booking = EventBooking.objects.filter(qr_token=qr_token).first()
+        booking = (
+            EventBooking.objects.select_for_update()
+            .filter(qr_token=qr_token)
+            .first()
+        )
         if booking is None:
             return Response(
                 {"valid": False, "error": "No booking found for this QR code."},
@@ -1796,6 +1801,18 @@ class AdminVerifyEventQRView(APIView):
                     "event": booking.event.title,
                 },
                 status=status.HTTP_409_CONFLICT,
+            )
+
+        if not booking.is_qr_valid():
+            return Response(
+                {
+                    "valid": False,
+                    "error": "This booking is not valid for check-in.",
+                    "booking_id": booking.booking_id,
+                    "name": booking.full_name,
+                    "event": booking.event.title,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         booking.checked_in = True
@@ -1980,11 +1997,16 @@ class AdminBookingVerifyQRView(APIView):
         IsAdminUserRole,
     ]
 
+    @transaction.atomic
     def post(self, request):
 
         qr_token = request.data.get("qr_token")
 
-        booking = Booking.objects.filter(qr_token=qr_token).first()
+        booking = (
+            Booking.objects.select_for_update()
+            .filter(qr_token=qr_token)
+            .first()
+        )
 
         if not booking:
 
@@ -2027,7 +2049,13 @@ class AdminBookingVerifyQRView(APIView):
                 "valid": True,
                 "booking_id": booking.booking_id,
                 "customer": booking.customer_name,
-                "item": booking.item.name,
+                "item": (
+                    booking.item.name
+                    if booking.item
+                    else booking.combo_pack.name
+                    if booking.combo_pack
+                    else ""
+                ),
             }
         )
 
@@ -3104,14 +3132,33 @@ from gaming.serializers import (
 class ForgotPasswordAPIView(APIView):
 
     permission_classes = []
+    throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
+    throttle_scope = "password_reset"
 
+    @transaction.atomic
     def post(self, request):
 
         serializer = ForgotPasswordSerializer(data=request.data)
 
         serializer.is_valid(raise_exception=True)
 
-        user = CustomUser.objects.get(email=serializer.validated_data["email"])
+        user = CustomUser.objects.select_for_update().filter(
+            email__iexact=serializer.validated_data["email"],
+            is_active=True,
+            is_deleted=False,
+        ).first()
+
+        if user is None:
+            return Response(
+                {
+                    "success": True,
+                    "message": (
+                        "If an account with that email exists, "
+                        "a reset code has been sent."
+                    ),
+                },
+                status=status.HTTP_200_OK,
+            )
 
         PasswordResetOTP.objects.filter(
             user=user,
@@ -3120,52 +3167,118 @@ class ForgotPasswordAPIView(APIView):
 
         otp = PasswordResetOTP.generate_otp()
 
-        PasswordResetOTP.objects.create(
+        otp_record = PasswordResetOTP.objects.create(
             user=user,
-            otp=otp,
+            otp=make_password(otp),
             expires_at=timezone.now() + timedelta(minutes=10),
         )
+
+        try:
+            sent_count = send_mail(
+                subject="Your DQD Gaming password reset code",
+                message=(
+                    f"Your password reset code is {otp}.\n\n"
+                    "This code expires in 10 minutes. If you did not request "
+                    "a password reset, you can ignore this email."
+                ),
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                fail_silently=False,
+            )
+            if not sent_count:
+                raise RuntimeError("The email backend did not send the reset code.")
+        except Exception:
+            otp_record.delete()
+            logger.exception("Password-reset email failed for %s.", user.email)
+            return Response(
+                {
+                    "success": False,
+                    "message": "Unable to send a reset code right now.",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         return Response(
             {
                 "success": True,
-                "message": "OTP generated successfully.",
-                "otp": otp,
-                "email": user.email,
+                "message": (
+                    "If an account with that email exists, "
+                    "a reset code has been sent."
+                ),
             }
         )
+
+
+PASSWORD_RESET_OTP_MAX_ATTEMPTS = 5
+
+
+def _validate_password_reset_otp(user, submitted_otp):
+    otp_record = (
+        PasswordResetOTP.objects.select_for_update()
+        .filter(user=user, is_used=False)
+        .order_by("-created_at")
+        .first()
+    )
+
+    if otp_record is None:
+        return None
+
+    if otp_record.is_expired():
+        otp_record.is_used = True
+        otp_record.save(update_fields=["is_used", "updated_at"])
+        return None
+
+    if otp_record.attempts >= PASSWORD_RESET_OTP_MAX_ATTEMPTS:
+        otp_record.is_used = True
+        otp_record.save(update_fields=["is_used", "updated_at"])
+        return None
+
+    otp_record.attempts += 1
+
+    try:
+        identify_hasher(otp_record.otp)
+    except ValueError:
+        is_valid = secrets.compare_digest(otp_record.otp, submitted_otp)
+        if is_valid:
+            otp_record.otp = make_password(submitted_otp)
+    else:
+        is_valid = check_password(submitted_otp, otp_record.otp)
+
+    if not is_valid and otp_record.attempts >= PASSWORD_RESET_OTP_MAX_ATTEMPTS:
+        otp_record.is_used = True
+
+    otp_record.save(
+        update_fields=["otp", "attempts", "is_used", "updated_at"]
+    )
+    return otp_record if is_valid else None
 
 
 class VerifyForgotOTPAPIView(APIView):
 
     permission_classes = []
+    throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
+    throttle_scope = "password_reset"
 
+    @transaction.atomic
     def post(self, request):
 
         serializer = VerifyForgotOTPSerializer(data=request.data)
 
         serializer.is_valid(raise_exception=True)
 
-        user = get_object_or_404(
-            CustomUser,
-            email=serializer.validated_data["email"],
-        )
-
-        otp = PasswordResetOTP.objects.filter(
-            user=user,
-            otp=serializer.validated_data["otp"],
-            is_used=False,
+        user = CustomUser.objects.filter(
+            email__iexact=serializer.validated_data["email"],
+            is_active=True,
+            is_deleted=False,
         ).first()
-
-        if not otp:
-
-            return Response({"success": False, "message": "Invalid OTP."}, status=400)
-
-        if otp.is_expired():
-
-            otp.delete()
-
-            return Response({"success": False, "message": "OTP expired."}, status=400)
+        if user is None or not _validate_password_reset_otp(
+            user,
+            serializer.validated_data["otp"],
+        ):
+            return Response(
+                {"success": False, "message": "Invalid or expired reset code."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         return Response({"success": True, "message": "OTP verified successfully."})
 
@@ -3173,40 +3286,45 @@ class VerifyForgotOTPAPIView(APIView):
 class ResetPasswordAPIView(APIView):
 
     permission_classes = []
+    throttle_classes = [AnonRateThrottle, ScopedRateThrottle]
+    throttle_scope = "password_reset"
 
+    @transaction.atomic
     def post(self, request):
 
         serializer = ResetPasswordSerializer(data=request.data)
 
         serializer.is_valid(raise_exception=True)
 
-        user = get_object_or_404(
-            CustomUser,
-            email=serializer.validated_data["email"],
-        )
-
-        otp = PasswordResetOTP.objects.filter(
-            user=user,
-            otp=serializer.validated_data["otp"],
-            is_used=False,
+        user = CustomUser.objects.select_for_update().filter(
+            email__iexact=serializer.validated_data["email"],
+            is_active=True,
+            is_deleted=False,
         ).first()
+        if user is None:
+            return Response(
+                {"success": False, "message": "Invalid or expired reset code."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        if not otp:
-
-            return Response({"success": False, "message": "Invalid OTP."}, status=400)
-
-        if otp.is_expired():
-
-            otp.delete()
-
-            return Response({"success": False, "message": "OTP expired."}, status=400)
+        otp_record = _validate_password_reset_otp(
+            user,
+            serializer.validated_data["otp"],
+        )
+        if otp_record is None:
+            return Response(
+                {"success": False, "message": "Invalid or expired reset code."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         user.set_password(serializer.validated_data["new_password"])
 
-        user.save()
+        user.save(update_fields=["password", "updated_at"])
 
-        otp.is_used = True
-        otp.save()
+        PasswordResetOTP.objects.filter(
+            user=user,
+            is_used=False,
+        ).update(is_used=True)
 
         return Response({"success": True, "message": "Password reset successfully."})
 
@@ -3230,14 +3348,13 @@ from gaming.serializers import (
 )
 from django.utils import timezone
 
-now = timezone.localtime()
-
 class PublicHomeAPIView(APIView):
     permission_classes = []
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = "public_home"
 
     def get(self, request):
+        now = timezone.localtime()
 
         # -----------------------
         # Events
@@ -3246,10 +3363,11 @@ class PublicHomeAPIView(APIView):
         events = (
                 ExclusiveEvent.objects.filter(
                     is_active=True,
+                    is_deleted=False,
                 )
                 .filter(
-                    models.Q(event_date__gt=now.date()) |
-                    models.Q(
+                    Q(event_date__gt=now.date())
+                    | Q(
                         event_date=now.date(),
                         end_time__gte=now.time(),
                     )
@@ -3261,7 +3379,10 @@ class PublicHomeAPIView(APIView):
         # Combo Packs
         # -----------------------
 
-        combos = ComboPack.objects.filter(is_active=True).prefetch_related(
+        combos = ComboPack.objects.filter(
+            is_active=True,
+            is_deleted=False,
+        ).prefetch_related(
             "gaming_items"
         )[:8]
 
@@ -3270,7 +3391,7 @@ class PublicHomeAPIView(APIView):
         # -----------------------
 
         categories = (
-            GameCategory.objects.filter(is_active=True)
+            GameCategory.objects.filter(is_active=True, is_deleted=False)
             .prefetch_related("gaming_items")
             .order_by("name")
         )
@@ -3281,6 +3402,7 @@ class PublicHomeAPIView(APIView):
 
         featured_games = GamingItem.objects.filter(
             is_active=True,
+            is_deleted=False,
             maintenance_mode=False,
         )[:5]
 
@@ -3332,10 +3454,20 @@ class PublicHomeAPIView(APIView):
             "total_users": CustomUser.objects.filter(
                 role=CustomUser.Role.USER,
                 is_active=True,
+                is_deleted=False,
             ).count(),
-            "total_games": GamingItem.objects.filter(is_active=True).count(),
-            "total_events": ExclusiveEvent.objects.filter(is_active=True).count(),
-            "total_combo_packs": ComboPack.objects.filter(is_active=True).count(),
+            "total_games": GamingItem.objects.filter(
+                is_active=True,
+                is_deleted=False,
+            ).count(),
+            "total_events": ExclusiveEvent.objects.filter(
+                is_active=True,
+                is_deleted=False,
+            ).count(),
+            "total_combo_packs": ComboPack.objects.filter(
+                is_active=True,
+                is_deleted=False,
+            ).count(),
         }
 
         serializer = HomeSerializer(
@@ -3372,7 +3504,10 @@ class UserGameCategoryAPIView(APIView):
 
     def get(self, request):
 
-        categories = GameCategory.objects.filter(is_active=True).order_by("name")
+        categories = GameCategory.objects.filter(
+            is_active=True,
+            is_deleted=False,
+        ).order_by("name")
 
         serializer = UserGameCategorySerializer(
             categories, many=True, context={"request": request}
@@ -3397,7 +3532,11 @@ class UserGameListAPIView(APIView):
 
         games = (
             GamingItem.objects.select_related("category")
-            .filter(is_active=True, maintenance_mode=False)
+            .filter(
+                is_active=True,
+                is_deleted=False,
+                maintenance_mode=False,
+            )
             .order_by("name")
         )
 
@@ -3428,7 +3567,10 @@ class UserGameDetailAPIView(APIView):
     def get(self, request, pk):
 
         game = get_object_or_404(
-            GamingItem.objects.select_related("category"), pk=pk, is_active=True
+            GamingItem.objects.select_related("category"),
+            pk=pk,
+            is_active=True,
+            is_deleted=False,
         )
 
         serializer = UserGamingItemDetailSerializer(game, context={"request": request})
@@ -3627,17 +3769,26 @@ class UserAvailableSlotsAPIView(APIView):
                 status=400,
             )
 
-        booking_date = datetime.strptime(date, "%Y-%m-%d").date()
+        try:
+            booking_date = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"success": False, "message": "Date must use YYYY-MM-DD format."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         item = get_object_or_404(
             GamingItem,
             pk=pk,
             is_active=True,
+            is_deleted=False,
+            maintenance_mode=False,
         )
 
         bookings = Booking.objects.filter(
             item=item,
             booking_date=booking_date,
+            is_deleted=False,
         ).exclude(status=Booking.Status.CANCELLED)
 
         opening = time(9, 0)
@@ -3655,11 +3806,16 @@ class UserAvailableSlotsAPIView(APIView):
             closing,
         )
 
+        now = timezone.localtime()
+
         while current < end:
 
             slot_end = current + timedelta(minutes=self.SLOT_DURATION)
 
-            available = True
+            available = (
+                booking_date > now.date()
+                or current.time() > now.time().replace(tzinfo=None)
+            )
 
             for booking in bookings:
 
@@ -3974,37 +4130,52 @@ class AvailableGamingSlotsAPIView(APIView):
                 status=400
             )
 
+        try:
+            booking_date = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            return Response(
+                {"detail": "date must use YYYY-MM-DD format"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         item = get_object_or_404(
                 GamingItem,
                 pk=item_id,
                 is_active=True,
                 is_deleted=False,
+                maintenance_mode=False,
             )
 
         bookings = Booking.objects.filter(
             item=item,
-            booking_date=date
+            booking_date=booking_date,
+            is_deleted=False,
         ).exclude(
             status=Booking.Status.CANCELLED
         )
 
         current = datetime.combine(
-            datetime.strptime(date, "%Y-%m-%d"),
+            booking_date,
             self.OPEN_TIME
         )
 
         end = datetime.combine(
-            datetime.strptime(date, "%Y-%m-%d"),
+            booking_date,
             self.CLOSE_TIME
         )
 
         slots = []
+        now = timezone.localtime()
 
         while current < end:
 
             slot_end = current + timedelta(hours=1)
 
-            booked = bookings.filter(
+            is_in_future = (
+                booking_date > now.date()
+                or current.time() > now.time().replace(tzinfo=None)
+            )
+            booked = not is_in_future or bookings.filter(
                 start_time__lt=slot_end.time(),
                 end_time__gt=current.time()
             ).exists()
@@ -4086,10 +4257,11 @@ class UserBookEventAPIView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    @transaction.atomic
     def post(self, request, pk):
 
         try:
-            event = ExclusiveEvent.objects.get(
+            event = ExclusiveEvent.objects.select_for_update().get(
                 pk=pk,
                 is_deleted=False,
                 is_active=True
@@ -4104,6 +4276,14 @@ class UserBookEventAPIView(APIView):
             return Response(
                 {"detail": "Event already finished."},
                 status=400,
+            )
+        if (
+            event.event_date == timezone.localdate()
+            and event.end_time <= timezone.localtime().time().replace(tzinfo=None)
+        ):
+            return Response(
+                {"detail": "Event has already finished."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         if EventBooking.objects.filter(

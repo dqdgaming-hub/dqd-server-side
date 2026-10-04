@@ -45,6 +45,7 @@ class Command(BaseCommand):
 
         user = User(
             email=email,
+            first_name="Admin",
             is_staff=True,
             is_superuser=True,
             is_active=True,

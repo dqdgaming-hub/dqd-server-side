@@ -527,7 +527,7 @@ IMAGE_ENCRYPTION_KEY = env(
 
 USE_X_FORWARDED_FOR = env_bool(
     "USE_X_FORWARDED_FOR",
-    default=False,
+    default=not DEBUG,
 )
 
 DEVICE_ACTIVITY_INTERVAL_SECONDS = env_int(

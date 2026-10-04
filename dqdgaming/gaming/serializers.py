@@ -496,29 +496,6 @@ class ExclusiveEventSerializer(serializers.ModelSerializer):
         ]
 
 
-class EventBookingSerializer(serializers.ModelSerializer):
-    event_title = serializers.CharField(source="event.title", read_only=True)
-
-    event_date = serializers.DateField(source="event.event_date", read_only=True)
-
-    event_image = EncryptedImageField(source="event.image", read_only=True)
-
-    is_qr_valid = serializers.SerializerMethodField()
-
-    class Meta:
-        model = EventBooking
-        fields = [
-            "id",
-            "event_title",
-            "event_date",
-            "event_image",
-            "is_qr_valid",
-        ]
-
-    def get_is_qr_valid(self, obj):
-        return obj.is_qr_valid()
-
-
 class UserSpinnerRewardSerializer(serializers.ModelSerializer):
     class Meta:
         model = SpinnerReward
@@ -545,19 +522,6 @@ class ComboPackSerializer(serializers.ModelSerializer):
             "combo_price",
             "loyalty_bonus",
             "image",
-        ]
-
-
-class LoyaltyTransactionSerializer(serializers.ModelSerializer):
-
-    class Meta:
-        model = LoyaltyTransaction
-        fields = [
-            "id",
-            "points",
-            "transaction_type",
-            "description",
-            "created_at",
         ]
 
 
@@ -1086,6 +1050,24 @@ class AdminBookingCreateSerializer(serializers.ModelSerializer):
                 {"end_time": "End time must be after start time."}
             )
 
+        item = attrs.get("item")
+        booking_date = attrs.get("booking_date")
+        if item and booking_date and start_time and end_time:
+            overlapping = Booking.objects.filter(
+                item=item,
+                booking_date=booking_date,
+                start_time__lt=end_time,
+                end_time__gt=start_time,
+                status__in=[
+                    Booking.Status.PENDING,
+                    Booking.Status.CONFIRMED,
+                ],
+            )
+            if overlapping.exists():
+                raise serializers.ValidationError(
+                    {"start_time": "This slot is already booked."}
+                )
+
         # If manual loyalty override is toggled, the points value must be present
         if (
             attrs.get("use_manual_loyalty_points")
@@ -1118,7 +1100,10 @@ class AdminBookingCreateSerializer(serializers.ModelSerializer):
         elif combo_pack:
             validated_data["loyalty_points_earned"] = combo_pack.loyalty_bonus or 0
 
-        booking = Booking.objects.create(**validated_data)
+        try:
+            booking = Booking.objects.create(**validated_data)
+        except DjangoValidationError as exc:
+            raise serializers.ValidationError(exc.messages) from exc
 
         for member in members_data:
             BookingMember.objects.create(
@@ -1668,23 +1653,17 @@ class ForgotPasswordSerializer(serializers.Serializer):
     email = serializers.EmailField()
 
     def validate_email(self, value):
-
-        if not CustomUser.objects.filter(
-            email=value,
-            is_active=True,
-        ).exists():
-
-            raise serializers.ValidationError("No account found with this email.")
-
-        return value
+        return value.strip().lower()
 
 
 class VerifyForgotOTPSerializer(serializers.Serializer):
 
     email = serializers.EmailField()
 
-    otp = serializers.CharField(
+    otp = serializers.RegexField(
+        regex=r"^\d{6}$",
         max_length=6,
+        min_length=6,
     )
 
 
@@ -1692,8 +1671,10 @@ class ResetPasswordSerializer(serializers.Serializer):
 
     email = serializers.EmailField()
 
-    otp = serializers.CharField(
+    otp = serializers.RegexField(
+        regex=r"^\d{6}$",
         max_length=6,
+        min_length=6,
     )
 
     new_password = serializers.CharField()
@@ -1790,18 +1771,6 @@ class UserGamingItemDetailSerializer(serializers.ModelSerializer):
         return None
 
 
-class BookingMemberSerializer(serializers.ModelSerializer):  # duplicate
-
-    class Meta:
-        model = BookingMember
-        fields = [
-            "id",
-            "name",
-            "phone",
-            "is_admin_added",
-        ]
-
-
 from datetime import datetime
 from decimal import Decimal
 from rest_framework import serializers
@@ -1831,11 +1800,24 @@ class BookingCreateSerializer(serializers.ModelSerializer):
         start_time = attrs["start_time"]
         end_time = attrs["end_time"]
 
-        members = self.initial_data.get("members", [])
+        members = attrs.get("members", [])
 
         if item.maintenance_mode:
             raise serializers.ValidationError(
                 "This game is currently under maintenance."
+            )
+
+        today = timezone.localdate()
+        if booking_date < today:
+            raise serializers.ValidationError(
+                {"booking_date": "Booking date cannot be in the past."}
+            )
+        if (
+            booking_date == today
+            and start_time <= timezone.localtime().time().replace(tzinfo=None)
+        ):
+            raise serializers.ValidationError(
+                {"start_time": "Booking start time must be in the future."}
             )
 
         if start_time >= end_time:
@@ -2651,21 +2633,6 @@ class UserGamingItemSerializer(serializers.ModelSerializer):
 
 from rest_framework import serializers
 
-class AvailableSlotSerializer(serializers.Serializer):
-    start_time = serializers.TimeField()
-    end_time = serializers.TimeField()
-    available = serializers.BooleanField()
-
-
-
-
-
-
-
-
-
-
-
 class UpcomingEventSerializer(serializers.ModelSerializer):
     available_slots = serializers.ReadOnlyField()
     image = EncryptedImageField(read_only=True)
@@ -2895,6 +2862,14 @@ class CreateComboBookingSerializer(serializers.Serializer):
 
         if attrs["end_time"] <= attrs["start_time"]:
             raise serializers.ValidationError({"end_time": "End time must be after start time."})
+        if (
+            attrs["booking_date"] == today
+            and attrs["start_time"]
+            <= timezone.localtime().time().replace(tzinfo=None)
+        ):
+            raise serializers.ValidationError(
+                {"start_time": "Booking start time must be in the future."}
+            )
 
         members = attrs.get("members", [])
         total_people = len(members) + 1

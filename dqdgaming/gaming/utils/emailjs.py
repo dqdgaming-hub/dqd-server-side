@@ -2,6 +2,8 @@ import os
 import requests
 import logging
 
+from gaming.utils.image_encryption import safe_image_to_data_uri
+
 logger = logging.getLogger(__name__)
 
 EMAILJS_API_URL = "https://api.emailjs.com/api/v1.0/email/send"
@@ -27,15 +29,12 @@ def send_emailjs(template_params, template_key="EMAILJS_TEMPLATE_ID"):
             timeout=30,
         )
 
-        print("EMAILJS STATUS:", response.status_code)
-        print("EMAILJS RESPONSE:", response.text)
-
         response.raise_for_status()
 
         return True
 
-    except Exception as exc:
-        logger.exception(exc)
+    except Exception:
+        logger.exception("EmailJS delivery failed.")
         return False
 
 
@@ -55,10 +54,9 @@ def send_game_booking_email(booking, request):
 
     qr_url = ""
     if booking.qr_code:
-        qr_url = request.build_absolute_uri(booking.qr_code.url)
+        qr_url = safe_image_to_data_uri(booking.qr_code) or ""
 
     currency = lambda v: f"INR {float(v):.2f}" if v is not None else "—"
-    print("QR URL:", qr_url)
     template_params = {
         "customer_name": booking.customer_name,
         "booking_id": booking.booking_id,
