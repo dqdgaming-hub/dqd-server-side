@@ -26,6 +26,9 @@ python manage.py migrate
 python manage.py collectstatic --noinput
 ```
 
+The migrations seed the default Terms & Conditions record when no active current
+version exists, so the public `/api/auth/terms/` endpoint is ready before signup.
+
 ## Google sign-in
 
 Set `GOOGLE_CLIENT_SECRET` in the backend `.env` to the secret for the same OAuth web client configured by `GOOGLE_CLIENT_ID` and `VITE_GOOGLE_CLIENT_ID`. Register each frontend sign-in URL (for example, `https://dqdgaming.com/sign-in` and `http://localhost:5173/sign-in`) as an authorized redirect URI in Google Cloud Console. Keep the client secret server-side; do not add it to a `VITE_` variable.
