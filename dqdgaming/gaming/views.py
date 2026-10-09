@@ -1,6 +1,7 @@
 import logging
 import os
 import secrets
+from smtplib import SMTPException
 from urllib import request
 from urllib.parse import urlparse
 from django.shortcuts import get_object_or_404
@@ -217,6 +218,14 @@ def _send_verification_email(user):
     )
 
 
+def _log_verification_email_failure(operation, error):
+    logger.warning(
+        "Verification email %s failed (%s).",
+        operation,
+        type(error).__name__,
+    )
+
+
 # ============================================================
 # REGISTRATION
 # ============================================================
@@ -237,11 +246,8 @@ class RegisterView(APIView):
 
         try:
             _send_verification_email(user)
-        except Exception:
-            logger.exception(
-                "Verification email failed for %s.",
-                user.email,
-            )
+        except (SMTPException, OSError) as error:
+            _log_verification_email_failure("during registration", error)
 
         return Response(
             _finalize_device_login(user, request),
@@ -555,11 +561,8 @@ class EmailResendView(APIView):
         if user:
             try:
                 _send_verification_email(user)
-            except Exception:
-                logger.exception(
-                    "Verification email resend failed for %s.",
-                    user.email,
-                )
+            except (SMTPException, OSError) as error:
+                _log_verification_email_failure("during resend", error)
 
         return Response(
             {

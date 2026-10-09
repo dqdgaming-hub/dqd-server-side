@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from datetime import date, time
+from smtplib import SMTPServerDisconnected
 
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.test import SimpleTestCase, override_settings
@@ -26,9 +27,59 @@ from gaming.views import (
 	GoogleCodeLoginView,
 	ForgotPasswordAPIView,
 	PublicHomeAPIView,
+	RegisterView,
 	UserAvailableSlotsAPIView,
+	_log_verification_email_failure,
 	_validate_password_reset_otp,
 )
+
+
+class VerificationEmailFailureLoggingTests(SimpleTestCase):
+	def test_logs_smtp_failure_without_traceback_or_recipient(self):
+		with self.assertLogs("gaming.views", level="WARNING") as captured:
+			_log_verification_email_failure(
+				"during registration",
+				SMTPServerDisconnected("Connection unexpectedly closed"),
+			)
+
+		self.assertEqual(len(captured.records), 1)
+		self.assertIn("SMTPServerDisconnected", captured.output[0])
+		self.assertNotIn("Traceback", captured.output[0])
+		self.assertNotIn("Connection unexpectedly closed", captured.output[0])
+
+	def test_registration_completes_when_smtp_disconnects(self):
+		request = APIRequestFactory().post(
+			"/api/auth/register/",
+			{},
+			format="json",
+		)
+		view = RegisterView()
+		request = view.initialize_request(request)
+		serializer = MagicMock()
+		serializer.save.return_value = SimpleNamespace()
+		response_data = {"registered": True}
+
+		with (
+			patch("gaming.views.RegisterSerializer", return_value=serializer),
+			patch(
+				"gaming.views._send_verification_email",
+				side_effect=SMTPServerDisconnected(
+					"Connection unexpectedly closed"
+				),
+			),
+			patch(
+				"gaming.views._finalize_device_login",
+				return_value=response_data,
+			),
+			self.assertLogs("gaming.views", level="WARNING") as captured,
+		):
+			response = RegisterView.post(view, request)
+
+		self.assertEqual(response.status_code, 201)
+		self.assertEqual(response.data, response_data)
+		self.assertIn("SMTPServerDisconnected", captured.output[0])
+		self.assertNotIn("Traceback", captured.output[0])
+		self.assertNotIn("Connection unexpectedly closed", captured.output[0])
 
 
 class BookingLoyaltyTests(SimpleTestCase):
