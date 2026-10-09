@@ -3407,7 +3407,7 @@ class PublicHomeAPIView(APIView):
             is_active=True,
             is_deleted=False,
             maintenance_mode=False,
-        )[:5]
+        )
 
         # -----------------------
         # Banner Priority
