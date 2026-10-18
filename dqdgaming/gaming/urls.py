@@ -27,11 +27,17 @@ from django.urls import path
 from rest_framework_simplejwt.views import TokenRefreshView, TokenVerifyView
 
 from gaming.views import *
+from gaming.booking_api import BookingOptionsView, BookingSlotsView, CreateBookingView
 from rest_framework.routers import DefaultRouter
 
 
 urlpatterns = [
     # ── Registration & login ──────────────────────────────────
+    path("health/", HealthCheckView.as_view(), name="health"),
+    # ── One booking flow for games, combos, events, loyalty points ──
+    path("user/book/options/", BookingOptionsView.as_view(), name="book-options"),
+    path("user/book/slots/", BookingSlotsView.as_view(), name="book-slots"),
+    path("user/book/", CreateBookingView.as_view(), name="book-create"),
     path("home/", PublicHomeAPIView.as_view(), name="public-home"),
     path("register/", RegisterView.as_view(), name="auth-register"),
     path("login/", LoginView.as_view(), name="auth-login"),
@@ -89,7 +95,9 @@ urlpatterns = [
     path("admin/combo-packs/<uuid:pk>/", AdminComboPackDetailView.as_view()),
     path("admin/events/", AdminEventListCreateView.as_view()),
     path("admin/events/<uuid:pk>/", AdminEventDetailView.as_view()),
+    # GET list (search, ?page=) / POST add user  →  returns whatsapp_url
     path("admin/users/", AdminUserListView.as_view()),
+    # GET detail / PATCH edit (name, phone, email, password, is_active)
     path("admin/users/<uuid:pk>/", AdminUserDetailView.as_view()),
     path("admin/users/<uuid:pk>/status/", AdminUserStatusView.as_view()),
     path("admin/users/<uuid:pk>/delete/", AdminUserDeleteView.as_view()),

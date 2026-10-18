@@ -2,14 +2,35 @@ import os
 import requests
 import logging
 
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 from gaming.utils.image_encryption import safe_image_to_data_uri
 
 logger = logging.getLogger(__name__)
 
 EMAILJS_API_URL = "https://api.emailjs.com/api/v1.0/email/send"
 
+# Connect / read timeouts plus a small retry budget for transient failures
+# (connection resets, 429, 5xx) with exponential backoff.
+_session = requests.Session()
+_session.mount(
+    "https://",
+    HTTPAdapter(
+        max_retries=Retry(
+            total=2,
+            backoff_factor=0.5,
+            status_forcelist=(429, 500, 502, 503, 504),
+            allowed_methods=frozenset({"POST"}),
+        )
+    ),
+)
+
 
 def send_emailjs(template_params, template_key="EMAILJS_TEMPLATE_ID"):
+
+    if not template_params.get("to_email"):
+        return False
 
     payload = {
         "service_id": os.getenv("EMAILJS_SERVICE_ID"),
@@ -20,13 +41,13 @@ def send_emailjs(template_params, template_key="EMAILJS_TEMPLATE_ID"):
     }
 
     try:
-        response = requests.post(
+        response = _session.post(
             EMAILJS_API_URL,
             json=payload,
             headers={
                 "Content-Type": "application/json",
             },
-            timeout=30,
+            timeout=(5, 15),
         )
 
         response.raise_for_status()

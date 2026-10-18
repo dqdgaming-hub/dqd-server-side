@@ -1,3 +1,7 @@
+import logging
+import re
+import time
+import uuid
 from datetime import timedelta
 
 from django.conf import settings
@@ -8,6 +12,49 @@ from gaming.tracking import parse_device_id
 
 
 DEFAULT_ACTIVITY_INTERVAL_SECONDS = 120
+
+request_logger = logging.getLogger("gaming.requests")
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9\-]{8,64}$")
+
+
+class RequestLogMiddleware:
+    """Tag each request with an ID and log errors / slow requests.
+
+    Reuses a sane ``X-Request-ID`` from the reverse proxy or load balancer so
+    one ID follows a request across nginx, gunicorn and the app logs.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+        self.slow_ms = int(getattr(settings, "SLOW_REQUEST_MS", 1000))
+
+    def __call__(self, request):
+        incoming = request.META.get("HTTP_X_REQUEST_ID", "")
+        request.request_id = incoming if _REQUEST_ID_RE.match(incoming) else uuid.uuid4().hex
+        started = time.monotonic()
+
+        response = self.get_response(request)
+
+        duration_ms = (time.monotonic() - started) * 1000
+        response["X-Request-ID"] = request.request_id
+
+        if response.status_code >= 500:
+            level = logging.ERROR
+        elif duration_ms >= self.slow_ms or response.status_code in (401, 403, 429):
+            level = logging.WARNING
+        else:
+            level = logging.DEBUG
+
+        request_logger.log(
+            level,
+            "%s %s -> %s in %.0fms [request_id=%s]",
+            request.method,
+            request.path,
+            response.status_code,
+            duration_ms,
+            request.request_id,
+        )
+        return response
 
 
 def get_activity_interval():

@@ -1,0 +1,248 @@
+"""API views for the gaming app, grouped by feature area.
+
+Every public view is re-exported here so ``gaming.urls`` (and anything else doing
+``from gaming.views import X``) keeps working regardless of which submodule
+defines it.
+"""
+
+from gaming.views.auth import (
+    RegisterView,
+    LoginView,
+    LogoutView,
+    EmailVerifyView,
+    EmailResendView,
+    GoogleLoginView,
+    GoogleCodeLoginView,
+    FacebookLoginView,
+)
+from gaming.views.password import (
+    PasswordChangeView,
+    PasswordResetRequestView,
+    PasswordResetConfirmView,
+    ChangePasswordAPIView,
+    ForgotPasswordAPIView,
+    PASSWORD_RESET_OTP_MAX_ATTEMPTS,
+    VerifyForgotOTPAPIView,
+    ResetPasswordAPIView,
+)
+from gaming.views.profile import (
+    MyDevicesView,
+    ProfileView,
+    NavbarProfileView,
+    ProfileAPIView,
+)
+from gaming.views.dashboard import (
+    UserDashboardAPIView,
+)
+from gaming.views.rewards import (
+    UserSpinView,
+    RedeemLoyaltySlotAPIView,
+    UserLoyaltyAPIView,
+    UserHappyHourAPIView,
+)
+from gaming.views.admin_dashboard import (
+    AdminDashboardAPIView,
+)
+from gaming.views.admin_catalog import (
+    AdminCategoryListCreateView,
+    AdminGameListCreateView,
+    AdminComboPackListCreateView,
+    AdminEventListCreateView,
+    AdminGameDetailView,
+    AdminCategoryDetailView,
+    AdminComboPackDetailView,
+    AdminEventDetailView,
+)
+from gaming.views.admin_users import (
+    AdminUserListView,
+    AdminUserDetailView,
+    AdminUserStatusView,
+    AdminUserDeleteView,
+)
+from gaming.views.admin_events import (
+    AdminEventBookingListCreateView,
+    AdminEventBookingDetailView,
+    AdminEventBookingApproveView,
+    AdminEventBookingRejectView,
+    AdminVerifyEventQRView,
+)
+from gaming.views.admin_bookings import (
+    AdminBookingListCreateView,
+    AdminBookingDetailView,
+    AdminBookingApproveView,
+    AdminBookingRejectView,
+    AdminBookingVerifyQRView,
+    AdminGameBookingListView,
+    AdminComboBookingListView,
+)
+from gaming.views.admin_happy_hour import (
+    AdminHappyHourTemplateListCreateView,
+    AdminSpinnerRewardListCreateView,
+    AdminHappyHourBookingsView,
+    AdminSpinnerSpinsView,
+    AdminAssignHappyHourGameView,
+    AdminVerifyHappyHourView,
+    AdminHappyHourAllocationViewSet,
+)
+from gaming.views.admin_loyalty import (
+    AdminUserLoyaltyListView,
+    AdminUserLoyaltyHistoryView,
+    AdminAdjustLoyaltyView,
+)
+from gaming.views.accounting import (
+    get_booking_queryset,
+    AdminAccountingDashboardAPIView,
+    AdminRevenueChartAPIView,
+    AdminAccountingBookingsAPIView,
+    AdminProfitLossAPIView,
+    AdminAccountingExcelExportAPIView,
+    sheet_value,
+    AdminAccountingPDFExportAPIView,
+    AdminAccountingGoogleSheetSyncAPIView,
+)
+from gaming.views.home import (
+    PublicHomeAPIView,
+    TermsAPIView,
+)
+from gaming.views.games import (
+    UserGameCategoryAPIView,
+    UserGameListAPIView,
+    UserGameDetailAPIView,
+    UserGamingItemListAPIView,
+)
+from gaming.views.user_bookings import (
+    UserBookingCreateAPIView,
+    UserBookingListAPIView,
+    UserBookingDetailAPIView,
+    UserBookingHistoryAPIView,
+    UserCancelBookingAPIView,
+    UserAvailableSlotsAPIView,
+    UserBookingWalletView,
+    UserCancelBookingView,
+    AvailableGamingSlotsAPIView,
+)
+from gaming.views.events import (
+    UserUpcomingEventsAPIView,
+    UserBookEventAPIView,
+    UserEventBookingsAPIView,
+    UserUpcomingBookingsAPIView,
+    UserPreviousBookingsAPIView,
+    UserCancelEventBookingAPIView,
+)
+from gaming.views.combos import (
+    combo_queryset,
+    booking_queryset,
+    UserComboPackListAPIView,
+    UserComboPackDetailAPIView,
+    CreateComboBookingAPIView,
+    UserComboBookingsAPIView,
+    UpcomingComboBookingsAPIView,
+    PreviousComboBookingsAPIView,
+    CancelComboBookingAPIView,
+)
+from gaming.views.health import (
+    HealthCheckView,
+)
+
+__all__ = [
+    "RegisterView",
+    "LoginView",
+    "LogoutView",
+    "EmailVerifyView",
+    "EmailResendView",
+    "GoogleLoginView",
+    "GoogleCodeLoginView",
+    "FacebookLoginView",
+    "PasswordChangeView",
+    "PasswordResetRequestView",
+    "PasswordResetConfirmView",
+    "ChangePasswordAPIView",
+    "ForgotPasswordAPIView",
+    "PASSWORD_RESET_OTP_MAX_ATTEMPTS",
+    "VerifyForgotOTPAPIView",
+    "ResetPasswordAPIView",
+    "MyDevicesView",
+    "ProfileView",
+    "NavbarProfileView",
+    "ProfileAPIView",
+    "UserDashboardAPIView",
+    "UserSpinView",
+    "RedeemLoyaltySlotAPIView",
+    "UserLoyaltyAPIView",
+    "UserHappyHourAPIView",
+    "AdminDashboardAPIView",
+    "AdminCategoryListCreateView",
+    "AdminGameListCreateView",
+    "AdminComboPackListCreateView",
+    "AdminEventListCreateView",
+    "AdminGameDetailView",
+    "AdminCategoryDetailView",
+    "AdminComboPackDetailView",
+    "AdminEventDetailView",
+    "AdminUserListView",
+    "AdminUserDetailView",
+    "AdminUserStatusView",
+    "AdminUserDeleteView",
+    "AdminEventBookingListCreateView",
+    "AdminEventBookingDetailView",
+    "AdminEventBookingApproveView",
+    "AdminEventBookingRejectView",
+    "AdminVerifyEventQRView",
+    "AdminBookingListCreateView",
+    "AdminBookingDetailView",
+    "AdminBookingApproveView",
+    "AdminBookingRejectView",
+    "AdminBookingVerifyQRView",
+    "AdminGameBookingListView",
+    "AdminComboBookingListView",
+    "AdminHappyHourTemplateListCreateView",
+    "AdminSpinnerRewardListCreateView",
+    "AdminHappyHourBookingsView",
+    "AdminSpinnerSpinsView",
+    "AdminAssignHappyHourGameView",
+    "AdminVerifyHappyHourView",
+    "AdminHappyHourAllocationViewSet",
+    "AdminUserLoyaltyListView",
+    "AdminUserLoyaltyHistoryView",
+    "AdminAdjustLoyaltyView",
+    "get_booking_queryset",
+    "AdminAccountingDashboardAPIView",
+    "AdminRevenueChartAPIView",
+    "AdminAccountingBookingsAPIView",
+    "AdminProfitLossAPIView",
+    "AdminAccountingExcelExportAPIView",
+    "sheet_value",
+    "AdminAccountingPDFExportAPIView",
+    "AdminAccountingGoogleSheetSyncAPIView",
+    "PublicHomeAPIView",
+    "TermsAPIView",
+    "UserGameCategoryAPIView",
+    "UserGameListAPIView",
+    "UserGameDetailAPIView",
+    "UserGamingItemListAPIView",
+    "UserBookingCreateAPIView",
+    "UserBookingListAPIView",
+    "UserBookingDetailAPIView",
+    "UserBookingHistoryAPIView",
+    "UserCancelBookingAPIView",
+    "UserAvailableSlotsAPIView",
+    "UserBookingWalletView",
+    "UserCancelBookingView",
+    "AvailableGamingSlotsAPIView",
+    "UserUpcomingEventsAPIView",
+    "UserBookEventAPIView",
+    "UserEventBookingsAPIView",
+    "UserUpcomingBookingsAPIView",
+    "UserPreviousBookingsAPIView",
+    "UserCancelEventBookingAPIView",
+    "combo_queryset",
+    "booking_queryset",
+    "UserComboPackListAPIView",
+    "UserComboPackDetailAPIView",
+    "CreateComboBookingAPIView",
+    "UserComboBookingsAPIView",
+    "UpcomingComboBookingsAPIView",
+    "PreviousComboBookingsAPIView",
+    "CancelComboBookingAPIView",
+    "HealthCheckView",
+]

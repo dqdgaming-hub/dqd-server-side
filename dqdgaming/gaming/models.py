@@ -2,7 +2,7 @@ import uuid
 import datetime
 import secrets
 
-from django.db import models
+from django.db import models, transaction
 from django.contrib.auth.models import (
     AbstractBaseUser,
     PermissionsMixin,
@@ -48,10 +48,10 @@ class BaseModel(models.Model):
 
 class CustomUserManager(BaseUserManager):
 
-    def create_user(self, email, password=None, **extra_fields):
-        if not email:
-            raise ValueError("Email is required")
-        email = self.normalize_email(email)
+    def create_user(self, email=None, password=None, **extra_fields):
+        email = self.normalize_email(email) if email else None
+        if not email and not extra_fields.get("phone"):
+            raise ValueError("Email or phone is required")
         extra_fields.setdefault("role", CustomUser.Role.USER)
         user = self.model(email=email, **extra_fields)
         user.set_password(password)
@@ -142,7 +142,8 @@ class CustomUser(AbstractBaseUser, PermissionsMixin, BaseModel):
 
     last_name = models.CharField(max_length=100, blank=True)
 
-    email = models.EmailField(unique=True, db_index=True)
+    # Optional: admin-created users may only have a mobile number.
+    email = models.EmailField(unique=True, null=True, blank=True)
 
     phone = models.CharField(
         max_length=20,
@@ -184,6 +185,11 @@ class CustomUser(AbstractBaseUser, PermissionsMixin, BaseModel):
 
     last_login = models.DateTimeField(null=True, blank=True)
 
+    # Brute-force protection (see gaming/auth_security.py)
+    failed_login_attempts = models.PositiveSmallIntegerField(default=0)
+
+    locked_until = models.DateTimeField(null=True, blank=True)
+
     objects = CustomUserManager()
 
     USERNAME_FIELD = "email"
@@ -208,10 +214,19 @@ class CustomUser(AbstractBaseUser, PermissionsMixin, BaseModel):
         indexes = [
             models.Index(fields=["email"]),
             models.Index(fields=["phone"]),
+            models.Index(fields=["role", "is_deleted", "-created_at"], name="user_role_created_idx"),
         ]
 
     def __str__(self):
-        return self.email
+        return self.email or self.phone or str(self.pk)
+
+    def save(self, *args, **kwargs):
+        # Empty strings would collide on the unique constraints.
+        if not self.email:
+            self.email = None
+        if not self.phone:
+            self.phone = None
+        super().save(*args, **kwargs)
 
     @property
     def full_name(self):
@@ -244,6 +259,12 @@ class UserDevice(BaseModel):
     browser = models.CharField(max_length=150, default="Unknown")
     operating_system = models.CharField(max_length=150, default="Unknown")
     user_agent = models.TextField(blank=True)
+    # From browser client hints / screen & locale APIs (display only)
+    screen_resolution = models.CharField(max_length=20, blank=True)
+    time_zone = models.CharField(max_length=64, blank=True)
+    language = models.CharField(max_length=35, blank=True)
+    # IP the device first signed in from; ip_address is the latest seen
+    first_ip_address = models.GenericIPAddressField(null=True, blank=True)
     last_seen = models.DateTimeField(default=timezone.now, db_index=True)
     login_at = models.DateTimeField(default=timezone.now)
     logged_out_at = models.DateTimeField(null=True, blank=True)
@@ -266,7 +287,7 @@ class UserDevice(BaseModel):
         ]
 
     def __str__(self):
-        return f"{self.user.email} - {self.device_name}"
+        return f"{self.user} - {self.device_name}"
 
     @property
     def is_currently_online(self):
@@ -404,6 +425,11 @@ class ComboPack(BaseModel):
     loyalty_bonus = models.PositiveIntegerField(
         default=0,
         help_text="Extra loyalty points awarded when this combo is booked",
+    )
+
+    max_people = models.PositiveIntegerField(
+        default=4,
+        help_text="Maximum number of people (including the person booking)",
     )
 
     image = models.BinaryField(
@@ -691,6 +717,12 @@ class Booking(BaseModel):
             models.Index(fields=["status"]),
             models.Index(fields=["payment_status"]),
             models.Index(fields=["qr_token"]),
+            # Slot-overlap checks and availability lookups
+            models.Index(fields=["item", "booking_date", "status"], name="booking_item_date_status_idx"),
+            # "My bookings" lists
+            models.Index(fields=["user", "-booking_date"], name="booking_user_date_idx"),
+            # Admin list (newest first, filtered by status)
+            models.Index(fields=["status", "-created_at"], name="booking_status_created_idx"),
         ]
 
     def clean(self):
@@ -705,13 +737,10 @@ class Booking(BaseModel):
             if not self.guest_name:
                 raise ValidationError("Guest name is required.")
 
-            if not self.guest_email:
-                raise ValidationError("Guest email is required.")
+            if not self.guest_phone and not self.guest_email:
+                raise ValidationError("Guest phone or email is required.")
 
-            if not self.guest_phone:
-                raise ValidationError("Guest phone is required.")
-
-        if self.item:
+        if self.item and self.status in (self.Status.PENDING, self.Status.CONFIRMED):
             overlapping = Booking.objects.filter(
                 item=self.item,
                 booking_date=self.booking_date,
@@ -733,12 +762,16 @@ class Booking(BaseModel):
 
     def save(self, *args, **kwargs):
 
-        self.clean()
-
         if not self.booking_id:
             self.booking_id = f"DQD-{uuid.uuid4().hex[:8].upper()}"
 
-        super().save(*args, **kwargs)
+        # Lock the gaming item row so two concurrent requests cannot both
+        # pass the overlap check and double-book the same slot.
+        with transaction.atomic():
+            if self.item_id:
+                GamingItem.objects.select_for_update().filter(pk=self.item_id).first()
+            self.clean()
+            super().save(*args, **kwargs)
 
     @property
     def customer_name(self):
@@ -888,17 +921,16 @@ class ExclusiveEvent(BaseModel):
     def __str__(self):
         return self.title
 
+    def seats_taken(self):
+        """Seats used by active bookings (the booker + their guests)."""
+        active = self.bookings.filter(is_deleted=False).exclude(
+            status__in=[EventBooking.Status.CANCELLED, EventBooking.Status.REJECTED],
+        )
+        return active.count() + EventBookingMember.objects.filter(event_booking__in=active).count()
+
     @property
     def available_slots(self):
-        booked = self.bookings.filter(
-            is_deleted=False,
-        ).exclude(
-            status__in=[
-                EventBooking.Status.CANCELLED,
-                EventBooking.Status.REJECTED,
-            ],
-        ).count()
-        return max(0, self.max_participants - booked)
+        return max(0, self.max_participants - self.seats_taken())
 
 
 class EventBooking(BaseModel):
@@ -977,6 +1009,11 @@ class EventBooking(BaseModel):
 
     class Meta:
         db_table = "event_bookings"
+        indexes = [
+            models.Index(fields=["event", "status"], name="event_booking_event_status_idx"),
+            models.Index(fields=["user", "-created_at"], name="event_booking_user_idx"),
+            models.Index(fields=["status", "-created_at"], name="event_booking_status_idx"),
+        ]
 
     def save(self, *args, **kwargs):
 
@@ -992,6 +1029,28 @@ class EventBooking(BaseModel):
             and not self.checked_in
             and self.status == self.Status.APPROVED
         )
+
+    @property
+    def total_people(self):
+        return self.members.count() + 1
+
+
+class EventBookingMember(BaseModel):
+    """Guests a user brings to an event (the booker is not listed here)."""
+
+    event_booking = models.ForeignKey(
+        EventBooking,
+        on_delete=models.CASCADE,
+        related_name="members",
+    )
+    name = models.CharField(max_length=150)
+    phone = models.CharField(max_length=20, blank=True)
+
+    class Meta:
+        db_table = "event_booking_members"
+
+    def __str__(self):
+        return f"{self.name} ({self.event_booking.booking_id})"
 
 
 # ==========================================================
@@ -1051,9 +1110,13 @@ class LoyaltyTransaction(BaseModel):
     class Meta:
         db_table = "loyalty_transactions"
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="loyalty_user_created_idx"),
+            models.Index(fields=["booking", "transaction_type"], name="loyalty_booking_type_idx"),
+        ]
 
     def __str__(self):
-        return f"{self.user.email} | {self.points:+d} pts | {self.transaction_type}"
+        return f"{self.user} | {self.points:+d} pts | {self.transaction_type}"
 
 
 # ==========================================================
@@ -1153,7 +1216,7 @@ class SpinnerSpin(BaseModel):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.user.email} " f"Week {self.spin_week}"
+        return f"{self.user} Week {self.spin_week}"
 
 
 # ==========================================================
@@ -1248,7 +1311,7 @@ class HappyHourSlot(BaseModel):
         db_table = "happy_hour_slots"
 
     def __str__(self):
-        return f"{self.user.email}" f" - {self.allocated_date}"
+        return f"{self.user} - {self.allocated_date}"
 
 
 class HappyHourBooking(BaseModel):
@@ -1372,7 +1435,7 @@ class BookingExportRequest(BaseModel):
                 )
 
     def __str__(self):
-        return f"{self.requested_by.email} | " f"{self.period_type} | {self.status}"
+        return f"{self.requested_by} | {self.period_type} | {self.status}"
 
 
 from datetime import timedelta
@@ -1404,6 +1467,9 @@ class PasswordResetOTP(BaseModel):
     class Meta:
         db_table = "password_reset_otps"
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "is_used", "-created_at"], name="otp_user_used_created_idx"),
+        ]
 
     def is_expired(self):
         return timezone.now() > self.expires_at
@@ -1495,3 +1561,53 @@ class HappyHourAllocation(BaseModel):
         self.clean()
 
         super().save(*args, **kwargs)
+
+# ==========================================================
+# LOGIN ACTIVITY
+# Audit trail of sign-ins, failures, lockouts and logouts with
+# IP, device and browser. Purge old rows with
+# `python manage.py purge_login_activity --days 180`.
+# ==========================================================
+
+
+class LoginActivity(BaseModel):
+
+    class Event(models.TextChoices):
+        LOGIN_SUCCESS = "login_success", "Login"
+        LOGIN_FAILED = "login_failed", "Wrong password"
+        LOGIN_LOCKED = "login_locked", "Blocked (locked)"
+        REGISTER = "register", "Sign up"
+        SOCIAL_LOGIN = "social_login", "Social login"
+        LOGOUT = "logout", "Logout"
+        PASSWORD_RESET = "password_reset", "Password reset"
+
+    user = models.ForeignKey(
+        CustomUser,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="login_activities",
+    )
+    # What was typed in the login box (kept for failed attempts on unknown accounts)
+    identifier = models.CharField(max_length=254, blank=True)
+    event = models.CharField(max_length=20, choices=Event.choices)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    device_id = models.UUIDField(null=True, blank=True)
+    device_name = models.CharField(max_length=255, blank=True)
+    device_type = models.CharField(max_length=20, blank=True)
+    browser = models.CharField(max_length=150, blank=True)
+    operating_system = models.CharField(max_length=150, blank=True)
+    user_agent = models.TextField(blank=True)
+    detail = models.CharField(max_length=255, blank=True)
+
+    class Meta:
+        db_table = "login_activities"
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "-created_at"], name="login_act_user_idx"),
+            models.Index(fields=["ip_address", "-created_at"], name="login_act_ip_idx"),
+            models.Index(fields=["event", "-created_at"], name="login_act_event_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.event} {self.identifier or self.user_id} {self.ip_address}"

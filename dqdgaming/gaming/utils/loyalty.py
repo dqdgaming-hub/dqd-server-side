@@ -1,6 +1,15 @@
 from django.db import transaction
-from django.db.models import F
-from gaming.models import Booking, LoyaltyTransaction
+from django.db.models import F, Sum
+from django.db.models.functions import Greatest
+
+from gaming.models import Booking, CustomUser, LoyaltyTransaction
+
+
+CREDIT_TYPES = (
+    LoyaltyTransaction.TransactionType.EARNED,
+    LoyaltyTransaction.TransactionType.COMBO_BONUS,
+    LoyaltyTransaction.TransactionType.ADMIN_GRANT,
+)
 
 
 @transaction.atomic
@@ -22,7 +31,7 @@ def award_booking_loyalty_points(booking, admin_user=None):
         .get(pk=booking.pk)
     )
 
-    if not booking.user:
+    if not booking.user or booking.status == Booking.Status.CANCELLED:
         return None
 
     points = booking.awarded_loyalty_points
@@ -37,6 +46,7 @@ def award_booking_loyalty_points(booking, admin_user=None):
 
     existing_transaction = LoyaltyTransaction.objects.filter(
         booking=booking,
+        transaction_type__in=CREDIT_TYPES,
     ).first()
 
     if existing_transaction:
@@ -60,7 +70,45 @@ def award_booking_loyalty_points(booking, admin_user=None):
         description=f"Booking {booking.booking_id}",
     )
 
-    booking.user.loyalty_points = F("loyalty_points") + points
-    booking.user.save(update_fields=["loyalty_points"])
+    CustomUser.objects.filter(pk=booking.user_id).update(
+        loyalty_points=F("loyalty_points") + points
+    )
 
     return loyalty_transaction
+
+
+@transaction.atomic
+def reverse_booking_loyalty_points(booking, reason="cancelled"):
+    """Undo loyalty effects of a cancelled booking (idempotent).
+
+    - Points *earned* for the booking are taken back.
+    - Points *spent* to redeem the booking are refunded.
+    Returns the net change applied to the user's balance.
+    """
+    if not booking.user_id:
+        return 0
+
+    # Serialize concurrent cancels for the same booking.
+    Booking.objects.select_for_update(of=("self",)).filter(pk=booking.pk).first()
+
+    totals = LoyaltyTransaction.objects.filter(booking_id=booking.pk).aggregate(net=Sum("points"))
+    net = totals["net"] or 0
+    if net == 0:
+        return 0
+
+    LoyaltyTransaction.objects.create(
+        user_id=booking.user_id,
+        booking_id=booking.pk,
+        points=-net,
+        transaction_type=(
+            LoyaltyTransaction.TransactionType.REDEEMED
+            if net > 0
+            else LoyaltyTransaction.TransactionType.ADMIN_GRANT
+        ),
+        description=f"Booking {booking.booking_id} {reason}: "
+        + ("points reversed" if net > 0 else "redeemed points refunded"),
+    )
+    CustomUser.objects.filter(pk=booking.user_id).update(
+        loyalty_points=Greatest(F("loyalty_points") - net, 0)
+    )
+    return -net

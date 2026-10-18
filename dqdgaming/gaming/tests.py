@@ -29,14 +29,14 @@ from gaming.views import (
 	PublicHomeAPIView,
 	RegisterView,
 	UserAvailableSlotsAPIView,
-	_log_verification_email_failure,
-	_validate_password_reset_otp,
 )
+from gaming.views.auth import _log_verification_email_failure
+from gaming.views.password import _validate_password_reset_otp
 
 
 class VerificationEmailFailureLoggingTests(SimpleTestCase):
 	def test_logs_smtp_failure_without_traceback_or_recipient(self):
-		with self.assertLogs("gaming.views", level="WARNING") as captured:
+		with self.assertLogs("gaming.views.auth", level="WARNING") as captured:
 			_log_verification_email_failure(
 				"during registration",
 				SMTPServerDisconnected("Connection unexpectedly closed"),
@@ -60,18 +60,18 @@ class VerificationEmailFailureLoggingTests(SimpleTestCase):
 		response_data = {"registered": True}
 
 		with (
-			patch("gaming.views.RegisterSerializer", return_value=serializer),
+			patch("gaming.views.auth.RegisterSerializer", return_value=serializer),
 			patch(
-				"gaming.views._send_verification_email",
+				"gaming.views.auth._send_verification_email",
 				side_effect=SMTPServerDisconnected(
 					"Connection unexpectedly closed"
 				),
 			),
 			patch(
-				"gaming.views._finalize_device_login",
+				"gaming.views.auth._finalize_device_login",
 				return_value=response_data,
 			),
-			self.assertLogs("gaming.views", level="WARNING") as captured,
+			self.assertLogs("gaming.views.auth", level="WARNING") as captured,
 		):
 			response = RegisterView.post(view, request)
 
@@ -98,8 +98,8 @@ class BookingLoyaltyTests(SimpleTestCase):
 
 
 class ClientIpTrackingTests(SimpleTestCase):
-	@override_settings(USE_X_FORWARDED_FOR=True)
-	def test_uses_first_forwarded_ip_when_proxy_header_is_trusted(self):
+	@override_settings(USE_X_FORWARDED_FOR=True, NUM_PROXIES_FOR_IP=2)
+	def test_uses_client_ip_added_by_outermost_trusted_proxy(self):
 		request = SimpleNamespace(
 			META={
 				"REMOTE_ADDR": "10.0.0.5",
@@ -138,11 +138,11 @@ class AdminBookingCreateSerializerTests(SimpleTestCase):
 		overlapping = MagicMock()
 		overlapping.exists.return_value = True
 
-		with patch("gaming.serializers.Booking.objects.filter", return_value=overlapping) as filter_bookings:
+		with patch("gaming.serializers.admin_bookings.Booking.objects.filter", return_value=overlapping) as filter_bookings:
 			with self.assertRaises(DRFValidationError) as raised:
 				AdminBookingCreateSerializer().validate(
 					{
-						"user": SimpleNamespace(),
+						"user": SimpleNamespace(is_active=True, is_deleted=False),
 						"guest_name": "",
 						"guest_email": "",
 						"guest_phone": "",
@@ -163,7 +163,7 @@ class AdminBookingCreateSerializerTests(SimpleTestCase):
 		)
 
 	@patch(
-		"gaming.serializers.Booking.objects.create",
+		"gaming.serializers.admin_bookings.Booking.objects.create",
 		side_effect=DjangoValidationError("This slot is already booked."),
 	)
 	def test_converts_model_validation_race_to_serializer_error(self, create_booking):
@@ -313,7 +313,7 @@ class GoogleCodeLoginViewTests(SimpleTestCase):
 			format="json",
 		)
 
-		with patch("gaming.views.http_requests.post") as google_token_exchange:
+		with patch("gaming.views.auth.http_requests.post") as google_token_exchange:
 			response = GoogleCodeLoginView.as_view()(request)
 
 		self.assertEqual(response.status_code, 400)
@@ -375,12 +375,12 @@ class ProductionRegressionTests(SimpleTestCase):
 		users.count.return_value = 0
 
 		with (
-			patch("gaming.views.ExclusiveEvent.objects.filter", side_effect=[events, event_stats]),
-			patch("gaming.views.ComboPack.objects.filter", side_effect=[combos, combo_stats]),
-			patch("gaming.views.GameCategory.objects.filter", return_value=categories),
-			patch("gaming.views.GamingItem.objects.filter", side_effect=[games, game_stats]),
-			patch("gaming.views.CustomUser.objects.filter", return_value=users),
-			patch("gaming.views.HomeSerializer") as home_serializer,
+			patch("gaming.views.home.ExclusiveEvent.objects.filter", side_effect=[events, event_stats]),
+			patch("gaming.views.home.ComboPack.objects.filter", side_effect=[combos, combo_stats]),
+			patch("gaming.views.home.GameCategory.objects.filter", return_value=categories),
+			patch("gaming.views.home.GamingItem.objects.filter", side_effect=[games, game_stats]),
+			patch("gaming.views.home.CustomUser.objects.filter", return_value=users),
+			patch("gaming.views.home.HomeSerializer") as home_serializer,
 		):
 			home_serializer.return_value.data = {}
 			response = PublicHomeAPIView().get(self.factory.get("/"))
@@ -428,7 +428,7 @@ class ProductionRegressionTests(SimpleTestCase):
 			BookingMemberSerializer.Meta.read_only_fields,
 		)
 
-	@patch("gaming.views.PasswordResetOTP.objects.select_for_update")
+	@patch("gaming.views.password.PasswordResetOTP.objects.select_for_update")
 	def test_legacy_reset_code_is_verified_and_upgraded(self, select_for_update):
 		record = SimpleNamespace(
 			otp="123456",
@@ -448,7 +448,7 @@ class ProductionRegressionTests(SimpleTestCase):
 		self.assertEqual(record.attempts, 1)
 		self.assertTrue(check_password("123456", record.otp))
 
-	@patch("gaming.views.PasswordResetOTP.objects.select_for_update")
+	@patch("gaming.views.password.PasswordResetOTP.objects.select_for_update")
 	def test_reset_code_is_invalidated_after_five_failed_attempts(
 		self,
 		select_for_update,
@@ -471,7 +471,7 @@ class ProductionRegressionTests(SimpleTestCase):
 		self.assertEqual(record.attempts, 5)
 		self.assertTrue(record.is_used)
 
-	@patch("gaming.views.CustomUser.objects.select_for_update")
+	@patch("gaming.views.password.CustomUser.objects.select_for_update")
 	def test_forgot_password_response_does_not_disclose_code_for_unknown_email(
 		self,
 		select_for_update,
@@ -492,11 +492,12 @@ class ProductionRegressionTests(SimpleTestCase):
 			response_data.get("message", ""),
 		)
 
-	@patch("gaming.views.send_mail", return_value=1)
-	@patch("gaming.views.PasswordResetOTP.objects.create")
-	@patch("gaming.views.PasswordResetOTP.objects.filter")
-	@patch("gaming.views.CustomUser.objects.select_for_update")
-	@patch("gaming.views.PasswordResetOTP.generate_otp", return_value="123456")
+	@patch("gaming.views.password.check_otp_send_allowed", return_value=3)
+	@patch("gaming.views.password.send_mail", return_value=1)
+	@patch("gaming.views.password.PasswordResetOTP.objects.create")
+	@patch("gaming.views.password.PasswordResetOTP.objects.filter")
+	@patch("gaming.views.password.CustomUser.objects.select_for_update")
+	@patch("gaming.views.password.PasswordResetOTP.generate_otp", return_value="123456")
 	def test_forgot_password_sends_code_and_stores_only_hash(
 		self,
 		_generate_otp,
@@ -504,6 +505,7 @@ class ProductionRegressionTests(SimpleTestCase):
 		otp_filter,
 		create_otp,
 		send_mail_mock,
+		_check_allowed,
 	):
 		user = SimpleNamespace(email="user@example.com")
 		select_for_update.return_value.filter.return_value.first.return_value = user
@@ -521,4 +523,6 @@ class ProductionRegressionTests(SimpleTestCase):
 		self.assertTrue(check_password("123456", create_otp.call_args.kwargs["otp"]))
 		self.assertIn("123456", send_mail_mock.call_args.kwargs["message"])
 		otp_filter.assert_called_once_with(user=user, is_used=False)
+		otp_filter.return_value.update.assert_called_once_with(is_used=True)
+		self.assertEqual(response.data["resends_left"], 3)
 		_generate_otp.assert_called_once()

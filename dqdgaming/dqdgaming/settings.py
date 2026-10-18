@@ -5,6 +5,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from corsheaders.defaults import default_headers as default_cors_headers
 from django.core.exceptions import ImproperlyConfigured
 from django.utils.csp import CSP
 from dotenv import load_dotenv
@@ -95,6 +96,7 @@ INSTALLED_APPS = [
 
 
 MIDDLEWARE = [
+    "gaming.middleware.RequestLogMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
@@ -184,16 +186,36 @@ else:
 # CACHE
 # ============================================================
 
-CACHES = {
-    "default": {
-        "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
-        "LOCATION": "dqdgaming-cache",
-        "TIMEOUT": env_int(
-            "DJANGO_CACHE_TIMEOUT",
-            300,
-        ),
+# Throttling, login lockout for unknown accounts and OTP limits use the
+# cache. With more than one gunicorn worker or server behind a load
+# balancer set REDIS_URL so every process shares the same counters.
+REDIS_URL = env("REDIS_URL", "")
+
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+            "TIMEOUT": env_int("DJANGO_CACHE_TIMEOUT", 300),
+            "KEY_PREFIX": "dqd",
+            "OPTIONS": {
+                "socket_connect_timeout": 2,
+                "socket_timeout": 2,
+                "retry_on_timeout": True,
+            },
+        }
     }
-}
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "dqdgaming-cache",
+            "TIMEOUT": env_int(
+                "DJANGO_CACHE_TIMEOUT",
+                300,
+            ),
+        }
+    }
 
 
 # ============================================================
@@ -250,6 +272,11 @@ USE_TZ = True
 # but these settings may still be needed by other application code.
 # ============================================================
 
+# Request size limits (also limit at the reverse proxy).
+DATA_UPLOAD_MAX_MEMORY_SIZE = env_int("DATA_UPLOAD_MAX_MEMORY_SIZE", 10 * 1024 * 1024)
+FILE_UPLOAD_MAX_MEMORY_SIZE = env_int("FILE_UPLOAD_MAX_MEMORY_SIZE", 5 * 1024 * 1024)
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 1000
+
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
@@ -268,7 +295,8 @@ REST_FRAMEWORK = {
         "rest_framework.parsers.FormParser",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        # JWT + refreshes the device's last-seen time and IP
+        "gaming.authentication.TrackedJWTAuthentication",
     ],
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
@@ -276,6 +304,9 @@ REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": [
         "rest_framework.renderers.JSONRenderer",
     ],
+    "EXCEPTION_HANDLER": "gaming.exceptions.api_exception_handler",
+    # Throttles key on client IP; 0 = REMOTE_ADDR (ignore spoofable X-Forwarded-For).
+    "NUM_PROXIES": env_int("NUM_PROXIES", 1) if env_bool("USE_X_FORWARDED_FOR", default=not DEBUG) else 0,
     "DEFAULT_THROTTLE_CLASSES": [
         "rest_framework.throttling.AnonRateThrottle",
         "rest_framework.throttling.UserRateThrottle",
@@ -303,11 +334,15 @@ REST_FRAMEWORK = {
         ),
         "password_reset": env(
             "DRF_PASSWORD_RESET_THROTTLE",
-            "5/hour",
+            "20/hour",
         ),
         "social_login": env(
             "DRF_SOCIAL_LOGIN_THROTTLE",
             "10/minute",
+        ),
+        "booking": env(
+            "DRF_BOOKING_THROTTLE",
+            "30/hour",
         ),
     },
 }
@@ -427,10 +462,56 @@ SITE_URL = env(
     required=True,
 ).rstrip("/")
 
-FRONTEND_URL = env(
-    "FRONTEND_URL",
-    required=True,
-).rstrip("/")
+# May be a comma separated list; the first entry is used in emails / links.
+FRONTEND_URLS = [url.rstrip("/") for url in env_list("FRONTEND_URL")]
+
+if not FRONTEND_URLS:
+    raise ImproperlyConfigured("FRONTEND_URL must be set.")
+
+FRONTEND_URL = FRONTEND_URLS[0]
+
+
+# ============================================================
+# LOGIN / PASSWORD RESET LIMITS
+# ============================================================
+
+LOGIN_MAX_ATTEMPTS = env_int("LOGIN_MAX_ATTEMPTS", 3)
+LOGIN_LOCKOUT_MINUTES = env_int("LOGIN_LOCKOUT_MINUTES", 15)
+
+PASSWORD_RESET_MAX_RESENDS = env_int("PASSWORD_RESET_MAX_RESENDS", 3)
+PASSWORD_RESET_WINDOW_HOURS = env_int("PASSWORD_RESET_WINDOW_HOURS", 24)
+PASSWORD_RESET_RESEND_COOLDOWN_SECONDS = env_int(
+    "PASSWORD_RESET_RESEND_COOLDOWN_SECONDS",
+    60,
+)
+
+
+# ============================================================
+# PHONE / WHATSAPP
+# ============================================================
+
+# Prefixed to 10-digit local numbers so logins and wa.me links match.
+DEFAULT_PHONE_COUNTRY_CODE = env("DEFAULT_PHONE_COUNTRY_CODE", "91")
+LOCAL_PHONE_LENGTH = env_int("LOCAL_PHONE_LENGTH", 10)
+
+# Business WhatsApp number users message after booking (digits only).
+WHATSAPP_SENDER_NUMBER = env("WHATSAPP_SENDER_NUMBER", "")
+WHATSAPP_BUSINESS_NAME = env("VENUE_NAME", "DQD Gaming")
+VENUE_ADDRESS = env("VENUE_ADDRESS", "")
+VENUE_PHONE = env("VENUE_PHONE", "")
+
+SLOW_REQUEST_MS = env_int("SLOW_REQUEST_MS", 1000)
+
+
+# ============================================================
+# BOOKING RULES (one flow for games, combos, events, points)
+# ============================================================
+
+BOOKING_OPEN_HOUR = env_int("BOOKING_OPEN_HOUR", 10)
+BOOKING_CLOSE_HOUR = env_int("BOOKING_CLOSE_HOUR", 22)
+BOOKING_MAX_HOURS = env_int("BOOKING_MAX_HOURS", 6)
+BOOKING_MAX_DAYS_AHEAD = env_int("BOOKING_MAX_DAYS_AHEAD", 60)
+LOYALTY_POINTS_PER_HOUR = env_int("LOYALTY_POINTS_PER_HOUR", 100)
 
 
 # ============================================================
@@ -440,6 +521,15 @@ FRONTEND_URL = env(
 CORS_ALLOWED_ORIGINS = env_list(
     "CORS_ALLOWED_ORIGINS",
 )
+
+CORS_ALLOW_HEADERS = (
+    *default_cors_headers,
+    "x-device-id",
+    "x-client-info",
+    "x-request-id",
+)
+
+CORS_EXPOSE_HEADERS = ["X-Request-ID"]
 
 CORS_ALLOW_CREDENTIALS = env_bool(
     "CORS_ALLOW_CREDENTIALS",
@@ -529,6 +619,13 @@ USE_X_FORWARDED_FOR = env_bool(
     "USE_X_FORWARDED_FOR",
     default=not DEBUG,
 )
+
+# Client IP behind proxies: count NUM_PROXIES entries from the right of
+# X-Forwarded-For (the left part is client supplied and can be forged).
+NUM_PROXIES_FOR_IP = env_int("NUM_PROXIES", 1)
+
+# Use nginx's X-Real-IP instead (only if the proxy always overwrites it).
+TRUST_X_REAL_IP = env_bool("TRUST_X_REAL_IP", default=False)
 
 DEVICE_ACTIVITY_INTERVAL_SECONDS = env_int(
     "DEVICE_ACTIVITY_INTERVAL_SECONDS",
@@ -649,6 +746,11 @@ LOGGING = {
         "django.security": {
             "handlers": ["console"],
             "level": "WARNING",
+            "propagate": False,
+        },
+        "gaming.requests": {
+            "handlers": ["console"],
+            "level": env("REQUEST_LOG_LEVEL", "INFO").upper(),
             "propagate": False,
         },
     },
